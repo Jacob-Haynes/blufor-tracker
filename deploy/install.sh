@@ -5,7 +5,7 @@ set -euo pipefail
 
 APP_DIR="/opt/blufor-tracker"
 SERVICE_NAME="bft"
-USER="pi"
+USER="jhh-pi"
 
 echo "=== Blue Force Tracker — Pi Install ==="
 
