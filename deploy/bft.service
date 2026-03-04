@@ -1,0 +1,15 @@
+[Unit]
+Description=Blue Force Tracker
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/blufor-tracker
+ExecStart=/opt/blufor-tracker/deploy/start.sh
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

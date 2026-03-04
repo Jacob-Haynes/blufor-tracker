@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blue Force Tracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <div id="map"></div>
+    <div id="status-bar">
+        <span id="conn-status">CONNECTING...</span>
+        <span id="node-count">0 nodes</span>
+        <button id="msg-toggle">Messages <span id="unread-badge" class="unread-badge hidden">0</span></button>
+    </div>
+    <div id="chat-panel" class="hidden">
+        <div id="chat-header">
+            <select id="channel-select">
+                <option value="ALL">All Messages</option>
+                <option value="BROADCAST">BROADCAST</option>
+                <option value="HQ">HQ</option>
+            </select>
+        </div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Send as HQ..." />
+            <button id="chat-send">Send</button>
+        </div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
