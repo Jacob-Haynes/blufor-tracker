@@ -151,7 +151,7 @@ sessions/           # recorded session JSONL files (gitignored)
 Flash Raspberry Pi OS onto an SD card, then clone and install:
 
 ```bash
-git clone https://github.com/jacobhaynes/blufor-tracker.git
+git clone https://github.com/Jacob-Haynes/blufor-tracker.git
 cd blufor-tracker
 sudo bash deploy/install.sh
 sudo reboot
