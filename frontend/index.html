@@ -4,16 +4,69 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Blue Force Tracker</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#1a1a2e">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
     <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+    <div id="sos-banner" class="hidden">
+        <span id="sos-text"></span>
+        <button id="sos-ack-btn">Acknowledge</button>
+    </div>
     <div id="map"></div>
     <div id="status-bar">
         <span id="conn-status">CONNECTING...</span>
         <span id="node-count">0 nodes</span>
-        <button id="msg-toggle">Messages <span id="unread-badge" class="unread-badge hidden">0</span></button>
+        <select id="coord-format-select" class="coord-format-select" title="Coordinate format">
+            <option value="mgrs" selected>MGRS</option>
+            <option value="dd">DD</option>
+            <option value="dms">DMS</option>
+            <option value="bng">BNG</option>
+        </select>
+        <div id="toolbar-buttons">
+            <button id="waypoint-btn" class="toolbar-btn">+ Waypoint</button>
+            <button id="trails-btn" class="toolbar-btn active">Trails</button>
+            <button id="health-btn" class="toolbar-btn">Health</button>
+            <button id="measure-btn" class="toolbar-btn">Measure</button>
+            <button id="geofence-btn" class="toolbar-btn">Geofence</button>
+            <button id="annotate-btn" class="toolbar-btn">Annotate</button>
+            <button id="route-btn" class="toolbar-btn">Route</button>
+            <button id="control-btn" class="toolbar-btn">Control</button>
+            <button id="firemission-btn" class="toolbar-btn">Fire Mission</button>
+            <button id="reports-btn" class="toolbar-btn">Reports</button>
+            <button id="quickmsg-btn" class="toolbar-btn">Quick Msg</button>
+            <button id="wx-btn" class="toolbar-btn">Wx</button>
+            <button id="mesh-btn" class="toolbar-btn">Mesh</button>
+            <button id="advisor-btn" class="toolbar-btn">Advisor</button>
+            <button id="record-btn" class="toolbar-btn">Record</button>
+            <button id="replay-btn" class="toolbar-btn">Replay</button>
+            <button id="msg-toggle">Messages <span id="unread-badge" class="unread-badge hidden">0</span></button>
+        </div>
     </div>
+    <div id="health-panel" class="hidden">
+        <div id="health-header">
+            <strong>Node Health</strong>
+            <button id="health-close">&times;</button>
+        </div>
+        <div id="health-table-wrap">
+            <table id="health-table">
+                <thead>
+                    <tr>
+                        <th>Callsign</th>
+                        <th>Battery</th>
+                        <th>Last Seen</th>
+                        <th>Speed</th>
+                        <th>Position</th>
+                        <th>Signal</th>
+                    </tr>
+                </thead>
+                <tbody id="health-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+    <div id="report-panel" class="report-panel hidden"></div>
     <div id="chat-panel" class="hidden">
         <div id="chat-header">
             <select id="channel-select">
@@ -25,10 +78,38 @@
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <input type="text" id="chat-input" placeholder="Send as HQ..." />
+            <label class="ack-label" title="Request acknowledgement"><input type="checkbox" id="chat-req-ack" /> ACK</label>
             <button id="chat-send">Send</button>
         </div>
     </div>
+    <div id="quickmsg-panel" class="quickmsg-panel hidden"></div>
+    <div id="firemission-panel" class="firemission-panel hidden"></div>
+    <div id="advisor-panel" class="advisor-panel hidden"></div>
+    <div id="weather-widget" class="weather-widget hidden"></div>
+    <div id="toast-container"></div>
+    <div id="replay-controls" class="hidden">
+        <button id="replay-play">&#9654;</button>
+        <button id="replay-pause">&#10074;&#10074;</button>
+        <button id="replay-stop">&#9632;</button>
+        <input type="range" id="replay-scrubber" min="0" max="100" value="0" />
+        <span id="replay-time"></span>
+    </div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mgrs@1/mgrs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/proj4@2/dist/proj4.js"></script>
+    <script src="/static/coords.js"></script>
+    <script src="/static/reports.js"></script>
+    <script src="/static/firemission.js"></script>
+    <script src="/static/topology.js"></script>
+    <script src="/static/advisor.js"></script>
     <script src="/static/app.js"></script>
+    <script>
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("/static/sw.js").catch(function (e) {
+                console.warn("SW registration failed:", e);
+            });
+        }
+    </script>
 </body>
 </html>

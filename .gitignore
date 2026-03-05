@@ -16,4 +16,7 @@ env/
 *.swp
 *.swo
 *~
+models/
+sessions/
+*.gguf
 .DS_Store
