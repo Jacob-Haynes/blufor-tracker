@@ -94,18 +94,30 @@ The advisor runs a small quantised model on-device for air-gapped operation.
 
 ### Setup
 
-1. Create a `models/` directory in the project root
-2. Download a GGUF model (e.g. Qwen3 0.6B Q5_K_M):
+1. Create the models directory and download a GGUF model:
    ```bash
    mkdir -p models
-   # Download your preferred GGUF model into models/
+   wget -O models/qwen3-0.6b-q8_0.gguf \
+     "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
    ```
-3. Install the inference library:
+2. Install the inference library:
    ```bash
    pip install llama-cpp-python
    ```
-4. Start the server — the model loads automatically in the background
-5. Click the **Advisor** button in the web UI to open the panel
+3. Start (or restart) the server — the model loads automatically in the background
+4. Click the **Advisor** button in the web UI to open the panel
+
+On a Pi deployment (`/opt/blufor-tracker`):
+
+```bash
+sudo mkdir -p /opt/blufor-tracker/models
+sudo chown $USER:$USER /opt/blufor-tracker/models
+wget -O /opt/blufor-tracker/models/qwen3-0.6b-q8_0.gguf \
+  "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+source /opt/blufor-tracker/.venv/bin/activate
+pip install llama-cpp-python
+sudo systemctl restart bft
+```
 
 The advisor automatically includes current unit positions, active SOS alerts, recent reports, messages, routes, control measures, geofence status, and mesh network health in its context.
 
