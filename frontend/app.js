@@ -120,6 +120,7 @@
     var controlDrawControl = null;
 
     var fireMissionMode = false;
+    var fireMissionClickTarget = "target"; // "target" or "observer"
 
     var lastClickLatLon = null;
 
@@ -209,11 +210,33 @@
         return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
 
-    function showToast(message, type) {
+    function showToast(message, type, onclick) {
         type = type || "info";
         var toast = document.createElement("div");
         toast.className = "toast toast-" + type;
-        toast.textContent = message;
+        if (onclick) toast.classList.add("toast-clickable");
+
+        var textSpan = document.createElement("span");
+        textSpan.className = "toast-text";
+        textSpan.textContent = message;
+        toast.appendChild(textSpan);
+
+        var dismissBtn = document.createElement("button");
+        dismissBtn.className = "toast-dismiss";
+        dismissBtn.innerHTML = "&times;";
+        dismissBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        });
+        toast.appendChild(dismissBtn);
+
+        if (onclick) {
+            toast.addEventListener("click", function () {
+                onclick();
+                if (toast.parentNode) toast.parentNode.removeChild(toast);
+            });
+        }
+
         toastContainer.appendChild(toast);
         setTimeout(function () {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
@@ -222,6 +245,108 @@
 
     // Expose showToast to modules
     BFT._showToast = showToast;
+
+    // ===== COLOUR PICKER =====
+
+    var COLOUR_PRESETS = [
+        { name: "Red", hex: "#ff0000" },
+        { name: "Blue", hex: "#2196F3" },
+        { name: "Green", hex: "#4caf50" },
+        { name: "Yellow", hex: "#ffff00" },
+        { name: "Orange", hex: "#ff9800" },
+        { name: "Purple", hex: "#9c27b0" },
+        { name: "Cyan", hex: "#00bcd4" },
+        { name: "Black", hex: "#000000" },
+        { name: "White", hex: "#ffffff" },
+    ];
+
+    function showColourPicker(callback, defaultColour) {
+        defaultColour = defaultColour || "#ff0000";
+        var overlay = document.createElement("div");
+        overlay.className = "colour-picker-overlay";
+
+        var picker = document.createElement("div");
+        picker.className = "colour-picker";
+
+        var title = document.createElement("div");
+        title.className = "colour-picker-title";
+        title.textContent = "Select colour";
+        picker.appendChild(title);
+
+        var swatches = document.createElement("div");
+        swatches.className = "colour-picker-swatches";
+
+        var selectedColour = defaultColour;
+
+        COLOUR_PRESETS.forEach(function (preset) {
+            var swatch = document.createElement("div");
+            swatch.className = "colour-swatch";
+            if (preset.hex === defaultColour) swatch.classList.add("selected");
+            swatch.style.background = preset.hex;
+            swatch.title = preset.name;
+            swatch.addEventListener("click", function () {
+                selectedColour = preset.hex;
+                hexInput.value = preset.hex;
+                swatches.querySelectorAll(".colour-swatch").forEach(function (s) { s.classList.remove("selected"); });
+                swatch.classList.add("selected");
+            });
+            swatch.addEventListener("dblclick", function () {
+                selectedColour = preset.hex;
+                cleanup();
+                callback(selectedColour);
+            });
+            swatches.appendChild(swatch);
+        });
+        picker.appendChild(swatches);
+
+        var hexRow = document.createElement("div");
+        hexRow.className = "colour-picker-hex";
+        var hexInput = document.createElement("input");
+        hexInput.type = "text";
+        hexInput.value = defaultColour;
+        hexInput.placeholder = "#hex";
+        hexInput.addEventListener("input", function () {
+            if (/^#[0-9a-fA-F]{6}$/.test(hexInput.value)) {
+                selectedColour = hexInput.value;
+                swatches.querySelectorAll(".colour-swatch").forEach(function (s) { s.classList.remove("selected"); });
+            }
+        });
+        hexRow.appendChild(hexInput);
+
+        var okBtn = document.createElement("button");
+        okBtn.textContent = "OK";
+        okBtn.addEventListener("click", function () {
+            if (/^#[0-9a-fA-F]{3,6}$/.test(hexInput.value)) selectedColour = hexInput.value;
+            cleanup();
+            callback(selectedColour);
+        });
+        hexRow.appendChild(okBtn);
+
+        var cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.style.background = "#555";
+        cancelBtn.addEventListener("click", function () {
+            cleanup();
+            callback(null);
+        });
+        hexRow.appendChild(cancelBtn);
+
+        picker.appendChild(hexRow);
+        overlay.appendChild(picker);
+
+        overlay.addEventListener("click", function (e) {
+            if (e.target === overlay) {
+                cleanup();
+                callback(null);
+            }
+        });
+
+        document.body.appendChild(overlay);
+
+        function cleanup() {
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        }
+    }
 
     // --- Haversine distance & bearing ---
     function haversineDistance(lat1, lon1, lat2, lon2) {
@@ -430,26 +555,64 @@
 
     function handleWaypointPlacement(e) {
         if (!waypointPlaceMode) return;
-        var name = prompt("Waypoint name:");
-        if (!name) return;
-        var typeChoice = prompt("Type (rv/objective/danger/checkpoint/rally/trp):", "checkpoint");
-        if (!typeChoice) typeChoice = "checkpoint";
-        var desc = prompt("Description (optional):", "");
+        var lat = e.latlng.lat;
+        var lon = e.latlng.lng;
 
-        fetch("/api/waypoints", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                name: name,
-                lat: e.latlng.lat,
-                lon: e.latlng.lng,
-                waypoint_type: typeChoice,
-                icon: WAYPOINT_ICONS[typeChoice] || "✓",
-                description: desc || "",
-            }),
-        });
+        // Build a small popup form instead of multiple prompts
+        var typeOptions = Object.keys(WAYPOINT_ICONS).map(function (t) {
+            return '<option value="' + t + '"' + (t === "checkpoint" ? ' selected' : '') + '>' + WAYPOINT_ICONS[t] + ' ' + t + '</option>';
+        }).join("");
 
-        toggleWaypointMode();
+        var formHtml = '<div style="min-width:180px">';
+        formHtml += '<div style="margin-bottom:4px"><label style="font-size:11px;color:#aaa">Name:</label><br><input id="wp-name-input" type="text" style="width:100%;padding:3px 6px;background:#16213e;color:#e0e0e0;border:1px solid #444;border-radius:3px;font-size:12px" placeholder="Waypoint name" /></div>';
+        formHtml += '<div style="margin-bottom:4px"><label style="font-size:11px;color:#aaa">Type:</label><br><select id="wp-type-select" style="width:100%;padding:3px 6px;background:#16213e;color:#e0e0e0;border:1px solid #444;border-radius:3px;font-size:12px">' + typeOptions + '</select></div>';
+        formHtml += '<div style="margin-bottom:4px"><label style="font-size:11px;color:#aaa">Description:</label><br><input id="wp-desc-input" type="text" style="width:100%;padding:3px 6px;background:#16213e;color:#e0e0e0;border:1px solid #444;border-radius:3px;font-size:12px" placeholder="Optional" /></div>';
+        formHtml += '<button id="wp-submit-btn" style="padding:4px 12px;background:#2196F3;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:12px;margin-top:2px">Create</button>';
+        formHtml += ' <button id="wp-cancel-btn" style="padding:4px 12px;background:#555;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:12px;margin-top:2px">Cancel</button>';
+        formHtml += '</div>';
+
+        var popup = L.popup({ closeOnClick: false, autoClose: false })
+            .setLatLng([lat, lon])
+            .setContent(formHtml)
+            .openOn(map);
+
+        // Defer event binding until popup is in DOM
+        setTimeout(function () {
+            var nameInput = document.getElementById("wp-name-input");
+            var typeSelect = document.getElementById("wp-type-select");
+            var descInput = document.getElementById("wp-desc-input");
+            var submitBtn = document.getElementById("wp-submit-btn");
+            var cancelBtn = document.getElementById("wp-cancel-btn");
+            if (nameInput) nameInput.focus();
+
+            if (submitBtn) submitBtn.addEventListener("click", function () {
+                var name = nameInput.value.trim();
+                if (!name) { nameInput.style.borderColor = "#f44336"; return; }
+                var typeChoice = typeSelect.value;
+                var desc = descInput.value.trim();
+
+                fetch("/api/waypoints", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        name: name,
+                        lat: lat,
+                        lon: lon,
+                        waypoint_type: typeChoice,
+                        icon: WAYPOINT_ICONS[typeChoice] || "\u2713",
+                        description: desc || "",
+                    }),
+                });
+
+                map.closePopup(popup);
+                toggleWaypointMode();
+            });
+
+            if (cancelBtn) cancelBtn.addEventListener("click", function () {
+                map.closePopup(popup);
+                toggleWaypointMode();
+            });
+        }, 50);
     }
 
     function loadWaypoints() {
@@ -675,6 +838,7 @@
         measurePoints = [];
         measureMarkers = [];
         measureLine = null;
+        lastElevationData = null;
     }
 
     function handleMeasureClick(e) {
@@ -702,9 +866,10 @@
 
             var midLat = (p1.lat + p2.lat) / 2;
             var midLng = (p1.lng + p2.lng) / 2;
+            var labelHtml = label + ' <button onclick="window._showElevProfile()" style="margin-left:4px;padding:1px 6px;background:#2196F3;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px;">Profile</button>';
             L.marker([midLat, midLng], {
-                icon: L.divIcon({ className: "measure-label", html: label, iconSize: null }),
-                interactive: false,
+                icon: L.divIcon({ className: "measure-label", html: labelHtml, iconSize: null }),
+                interactive: true,
             }).addTo(measureLayer);
 
             // Terrain profile
@@ -743,9 +908,10 @@
         .catch(function () { /* elevation not available */ });
     }
 
+    var lastElevationData = null; // store for re-opening profile
+
     function drawElevationProfile(elevations, totalDist, p1, p2) {
-        var midLat = (p1.lat + p2.lat) / 2;
-        var midLng = (p1.lng + p2.lng) / 2;
+        lastElevationData = { elevations: elevations, totalDist: totalDist, p1: p1, p2: p2 };
 
         var canvas = document.createElement("canvas");
         canvas.width = 200;
@@ -802,18 +968,29 @@
             if (diff > 0) totalAscent += diff;
             else totalDescent -= diff;
         }
-        ctx.fillText("↑" + Math.round(totalAscent) + "m ↓" + Math.round(totalDescent) + "m", w - 90, padTop);
+        ctx.fillText("\u2191" + Math.round(totalAscent) + "m \u2193" + Math.round(totalDescent) + "m", w - 90, padTop);
 
-        // Add as popup near the measure line
+        // Anchor popup at endpoint p2 instead of midpoint
         var popup = L.popup({
             closeOnClick: false,
             autoClose: false,
             className: "elevation-popup",
         })
-        .setLatLng([midLat - 0.0005, midLng])
+        .setLatLng([p2.lat, p2.lng])
         .setContent(canvas)
         .addTo(measureLayer);
     }
+
+    window._showElevProfile = function () {
+        if (lastElevationData) {
+            drawElevationProfile(
+                lastElevationData.elevations,
+                lastElevationData.totalDist,
+                lastElevationData.p1,
+                lastElevationData.p2
+            );
+        }
+    };
 
     // ===== GEOFENCE ALERTS =====
 
@@ -850,7 +1027,20 @@
     function handleGeofenceAlert(alert) {
         var msg = alert.callsign + " " + alert.alert_type + " " + alert.geofence_name;
         var type = alert.alert_type === "violated" ? "danger" : "warning";
-        showToast(msg, type);
+        var onclick = null;
+        if (alert.lat != null && alert.lon != null) {
+            onclick = (function (lat, lon) {
+                return function () { map.setView([lat, lon], 16); };
+            })(alert.lat, alert.lon);
+        } else if (positions[alert.callsign]) {
+            onclick = (function (cs) {
+                return function () {
+                    var p = positions[cs];
+                    if (p) map.setView([p.lat, p.lon], 16);
+                };
+            })(alert.callsign);
+        }
+        showToast(msg, type, onclick);
     }
 
     function toggleGeofenceMode() {
@@ -999,34 +1189,37 @@
 
         } else if (annotateDrawMode) {
             var annLabel = prompt("Label (optional):", "") || "";
-            var color = prompt("Color (hex):", "#ff0000") || "#ff0000";
 
-            var annBody = { label: annLabel, color: color };
-            if (layerType === "marker") {
-                var ll = layer.getLatLng();
-                annBody.annotation_type = "marker";
-                annBody.lat = ll.lat;
-                annBody.lon = ll.lng;
-            } else if (layerType === "circle") {
-                var c = layer.getLatLng();
-                annBody.annotation_type = "circle";
-                annBody.lat = c.lat;
-                annBody.lon = c.lng;
-                annBody.radius_m = layer.getRadius();
-            } else if (layerType === "polyline") {
-                annBody.annotation_type = "line";
-                annBody.coordinates = layer.getLatLngs().map(function (ll) { return [ll.lat, ll.lng]; });
-            } else if (layerType === "polygon") {
-                annBody.annotation_type = "polygon";
-                annBody.coordinates = layer.getLatLngs()[0].map(function (ll) { return [ll.lat, ll.lng]; });
-            }
+            showColourPicker(function (color) {
+                if (!color) return;
 
-            fetch("/api/annotations", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(annBody),
-            }).then(function (r) { return r.json(); })
-              .then(function (ann) { addAnnotationLayer(ann); });
+                var annBody = { label: annLabel, color: color };
+                if (layerType === "marker") {
+                    var ll = layer.getLatLng();
+                    annBody.annotation_type = "marker";
+                    annBody.lat = ll.lat;
+                    annBody.lon = ll.lng;
+                } else if (layerType === "circle") {
+                    var c = layer.getLatLng();
+                    annBody.annotation_type = "circle";
+                    annBody.lat = c.lat;
+                    annBody.lon = c.lng;
+                    annBody.radius_m = layer.getRadius();
+                } else if (layerType === "polyline") {
+                    annBody.annotation_type = "line";
+                    annBody.coordinates = layer.getLatLngs().map(function (ll2) { return [ll2.lat, ll2.lng]; });
+                } else if (layerType === "polygon") {
+                    annBody.annotation_type = "polygon";
+                    annBody.coordinates = layer.getLatLngs()[0].map(function (ll2) { return [ll2.lat, ll2.lng]; });
+                }
+
+                fetch("/api/annotations", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(annBody),
+                }).then(function (r) { return r.json(); })
+                  .then(function (ann) { addAnnotationLayer(ann); });
+            }, "#ff0000");
         }
     });
 
@@ -1167,18 +1360,21 @@
         }
         var name = prompt("Route name:", "Route " + (Object.keys(routeLayers).length + 1));
         if (!name) { clearRoutePreview(); disableRouteMode(); return; }
-        var color = prompt("Colour (hex):", "#00ff00") || "#00ff00";
 
-        fetch("/api/routes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: name, waypoints: routePoints, color: color }),
-        }).then(function (r) { return r.json(); })
-          .then(function (route) {
-              addRouteLayer(route);
-              clearRoutePreview();
-              disableRouteMode();
-          });
+        var savedPoints = routePoints.slice();
+        showColourPicker(function (color) {
+            if (!color) { clearRoutePreview(); disableRouteMode(); return; }
+            fetch("/api/routes", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: name, waypoints: savedPoints, color: color }),
+            }).then(function (r) { return r.json(); })
+              .then(function (route) {
+                  addRouteLayer(route);
+                  clearRoutePreview();
+                  disableRouteMode();
+              });
+        }, "#00ff00");
     }
 
     function addRouteLayer(route) {
@@ -1261,6 +1457,64 @@
         axis_of_advance: { color: "#2196F3", style: "solid", weight: 3 },
     };
 
+    // Control measure options state
+    var controlOptions = { type: "phase_line", lineStyle: "solid", color: "#ffff00" };
+    var controlOptionsPanel = null;
+
+    function createControlOptionsPanel() {
+        if (controlOptionsPanel) return;
+        controlOptionsPanel = document.createElement("div");
+        controlOptionsPanel.className = "control-options-panel hidden";
+        controlOptionsPanel.innerHTML =
+            '<div class="control-options-title">Control Measure Options</div>' +
+            '<div class="control-options-row"><label>Type:</label>' +
+            '<select id="cm-type-select">' +
+            '<option value="phase_line">Phase Line</option>' +
+            '<option value="boundary">Boundary</option>' +
+            '<option value="feba">FEBA</option>' +
+            '<option value="lod">LOD</option>' +
+            '<option value="fup">FUP</option>' +
+            '<option value="start_line">Start Line</option>' +
+            '<option value="axis_of_advance">Axis of Advance</option>' +
+            '</select></div>' +
+            '<div class="control-options-row"><label>Line style:</label>' +
+            '<select id="cm-style-select">' +
+            '<option value="solid">Solid</option>' +
+            '<option value="dashed">Dashed</option>' +
+            '<option value="dotted">Dotted</option>' +
+            '</select></div>' +
+            '<div class="control-options-row"><label>Colour:</label>' +
+            '<div class="control-options-colour">' +
+            '<div id="cm-colour-preview" class="control-colour-preview" style="background:#ffff00" title="Click to change"></div>' +
+            '<span id="cm-colour-hex" style="font-size:11px;color:#aaa">#ffff00</span>' +
+            '</div></div>' +
+            '<div style="font-size:10px;color:#666;margin-top:4px">Draw the polyline on the map, then enter a name.</div>';
+        document.body.appendChild(controlOptionsPanel);
+
+        document.getElementById("cm-type-select").addEventListener("change", function () {
+            controlOptions.type = this.value;
+            var defaults = CM_DEFAULTS[this.value] || CM_DEFAULTS.phase_line;
+            controlOptions.color = defaults.color;
+            controlOptions.lineStyle = defaults.style;
+            document.getElementById("cm-style-select").value = defaults.style;
+            document.getElementById("cm-colour-preview").style.background = defaults.color;
+            document.getElementById("cm-colour-hex").textContent = defaults.color;
+        });
+
+        document.getElementById("cm-style-select").addEventListener("change", function () {
+            controlOptions.lineStyle = this.value;
+        });
+
+        document.getElementById("cm-colour-preview").addEventListener("click", function () {
+            showColourPicker(function (colour) {
+                if (!colour) return;
+                controlOptions.color = colour;
+                document.getElementById("cm-colour-preview").style.background = colour;
+                document.getElementById("cm-colour-hex").textContent = colour;
+            }, controlOptions.color);
+        });
+    }
+
     function toggleControlMode() {
         controlMode = !controlMode;
         controlBtn.classList.toggle("active", controlMode);
@@ -1278,6 +1532,9 @@
                 if (geofenceDrawControl) map.removeControl(geofenceDrawControl);
             }
 
+            createControlOptionsPanel();
+            controlOptionsPanel.classList.remove("hidden");
+
             if (!controlDrawControl) {
                 controlDrawControl = new L.Control.Draw({
                     position: "topleft",
@@ -1289,9 +1546,10 @@
                 });
             }
             map.addControl(controlDrawControl);
-            showToast("Draw a polyline for the control measure", "info");
+            showToast("Set options above, then draw a polyline", "info");
         } else {
             if (controlDrawControl) map.removeControl(controlDrawControl);
+            if (controlOptionsPanel) controlOptionsPanel.classList.add("hidden");
         }
     }
 
@@ -1301,11 +1559,11 @@
             controlBtn.classList.remove("active");
             document.body.classList.remove("control-mode");
             if (controlDrawControl) map.removeControl(controlDrawControl);
+            if (controlOptionsPanel) controlOptionsPanel.classList.add("hidden");
         }
     }
 
     // Hook into Leaflet.draw for control measures
-    var _origDrawCreated = map._events[L.Draw.Event.CREATED];
     map.on(L.Draw.Event.CREATED, function (e) {
         if (!controlMode) return;
         var layer = e.layer;
@@ -1314,10 +1572,6 @@
 
         var name = prompt("Control measure name (e.g., PL ALPHA):");
         if (!name) return;
-        var typeChoice = prompt("Type (phase_line/boundary/feba/lod/fup/start_line/axis_of_advance):", "phase_line") || "phase_line";
-        var defaults = CM_DEFAULTS[typeChoice] || CM_DEFAULTS.phase_line;
-        var color = prompt("Colour (hex):", defaults.color) || defaults.color;
-        var lineStyle = prompt("Line style (solid/dashed/dotted):", defaults.style) || defaults.style;
 
         var coords = layer.getLatLngs().map(function (ll) { return [ll.lat, ll.lng]; });
 
@@ -1326,10 +1580,10 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 name: name,
-                measure_type: typeChoice,
+                measure_type: controlOptions.type,
                 coordinates: coords,
-                color: color,
-                line_style: lineStyle,
+                color: controlOptions.color,
+                line_style: controlOptions.lineStyle,
             }),
         }).then(function (r) { return r.json(); })
           .then(function (cm) {
@@ -1440,6 +1694,7 @@
         quickMsgVisible = !quickMsgVisible;
         quickMsgBtn.classList.toggle("active", quickMsgVisible);
         if (quickMsgVisible) {
+            if (chatOpen) toggleChat();
             renderQuickMsgPanel();
             quickMsgPanel.classList.remove("hidden");
         } else {
@@ -1448,17 +1703,25 @@
     }
 
     function renderQuickMsgPanel() {
-        var html = "";
+        // Channel selector
+        var channelOpts = '<option value="BROADCAST">BROADCAST</option>';
+        knownCallsigns.forEach(function (cs) {
+            channelOpts += '<option value="' + escapeHtml(cs) + '">' + escapeHtml(cs) + '</option>';
+        });
+        var html = '<select id="quickmsg-channel" class="quickmsg-channel">' + channelOpts + '</select>';
+
         CANNED_MSGS.forEach(function (msg, i) {
             html += '<button class="quickmsg-btn" data-idx="' + i + '">' + escapeHtml(msg) + '</button>';
         });
         quickMsgPanel.innerHTML = html;
 
+        var qmChannel = document.getElementById("quickmsg-channel");
         quickMsgPanel.querySelectorAll(".quickmsg-btn").forEach(function (btn) {
             btn.addEventListener("click", function () {
                 var text = CANNED_MSGS[parseInt(btn.dataset.idx, 10)];
-                sendMessageText("BROADCAST", text);
-                showToast("Sent: " + text, "info");
+                var channel = qmChannel.value;
+                sendMessageText(channel, text);
+                showToast("Sent to " + channel + ": " + text, "info");
             });
             btn.addEventListener("contextmenu", function (e) {
                 e.preventDefault();
@@ -1512,6 +1775,8 @@
     // ===== REPORTS PANEL =====
 
     function toggleReports() {
+        var willOpen = !reportsBtn.classList.contains("active");
+        if (willOpen) closeAllSidePanels("reports");
         var open = BFT.toggleReportPanel();
         reportsBtn.classList.toggle("active", open);
         document.body.classList.toggle("report-open", open);
@@ -1524,6 +1789,8 @@
     // ===== ADVISOR PANEL =====
 
     function toggleAdvisor() {
+        var willOpen = !advisorBtn.classList.contains("active");
+        if (willOpen) closeAllSidePanels("advisor");
         var open = BFT.toggleAdvisorPanel();
         advisorBtn.classList.toggle("active", open);
         document.body.classList.toggle("advisor-open", open);
@@ -1643,6 +1910,13 @@
         }
     }
 
+    // --- Side panel mutual exclusivity ---
+    function closeAllSidePanels(except) {
+        if (except !== "chat" && chatOpen) toggleChat();
+        if (except !== "reports" && reportsBtn.classList.contains("active")) toggleReports();
+        if (except !== "advisor" && advisorBtn.classList.contains("active")) toggleAdvisor();
+    }
+
     // --- Chat panel ---
     function registerCallsign(cs) {
         if (knownCallsigns.has(cs)) return;
@@ -1656,6 +1930,7 @@
     function toggleChat() {
         chatOpen = !chatOpen;
         if (chatOpen) {
+            closeAllSidePanels("chat");
             chatPanel.classList.remove("hidden");
             document.body.classList.add("chat-open");
             unreadCount = 0;
@@ -1813,6 +2088,8 @@
 
     // Expose for modules
     BFT._sendMessage = sendMessageText;
+    BFT._getPositions = function () { return positions; };
+    BFT._setFireMissionClickTarget = function (mode) { fireMissionClickTarget = mode; };
 
     // Right-click context menu for grid ref
     map.on("contextmenu", function (e) {
@@ -1889,7 +2166,11 @@
         } else if (routeMode) {
             handleRouteClick(e);
         } else if (fireMissionMode) {
-            BFT.setFireMissionTarget(e.latlng.lat, e.latlng.lng);
+            if (fireMissionClickTarget === "observer") {
+                BFT.setFireMissionObserver(e.latlng.lat, e.latlng.lng);
+            } else {
+                BFT.setFireMissionTarget(e.latlng.lat, e.latlng.lng);
+            }
         }
     });
 
