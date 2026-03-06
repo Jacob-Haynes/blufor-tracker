@@ -1549,6 +1549,7 @@ body.sos-active .advisor-panel {
     box-shadow: 0 2px 8px rgba(0,0,0,0.4);
     padding: 0;
     line-height: 1;
+    transition: right 0.25s ease;
 }
 
 .notif-log-btn:hover {
@@ -1594,6 +1595,7 @@ body.sos-active .advisor-panel {
     flex-direction: column;
     box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     overflow: hidden;
+    transition: right 0.25s ease;
 }
 
 .notif-log.hidden {
@@ -1691,6 +1693,21 @@ body.sos-active .advisor-panel {
     color: #666;
     padding: 16px;
     font-size: 12px;
+}
+
+body.chat-open .notif-log-btn,
+body.chat-open .notif-log {
+    right: 336px;
+}
+
+body.report-open .notif-log-btn,
+body.report-open .notif-log {
+    right: 376px;
+}
+
+body.advisor-open .notif-log-btn,
+body.advisor-open .notif-log {
+    right: 376px;
 }
 
 /* Larger touch targets for Pi touchscreen */
