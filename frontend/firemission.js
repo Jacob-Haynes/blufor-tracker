@@ -162,6 +162,8 @@
             '<div class="fm-result-line"><strong>Target Grid:</strong> ' + targetStr + '</div>';
         resultDiv.classList.remove("hidden");
 
+        drawFireMissionOverlay(target, observer, bearingMils, dist);
+
         // Show adjust section
         var adjustSection = document.getElementById("fm-adjust-section");
         adjustSection.classList.remove("hidden");
@@ -239,12 +241,58 @@
         currentFireMission.target = { lat: targetLat, lon: targetLon };
         currentFireMission.targetGrid = newGrid;
 
+        // Redraw overlay with adjusted target
+        var newDist = haversineDistance(currentFireMission.observer.lat, currentFireMission.observer.lon, targetLat, targetLon);
+        var newBearingDeg = compassBearing(currentFireMission.observer.lat, currentFireMission.observer.lon, targetLat, targetLon);
+        var newBearingMils = Math.round(BFT.degreesToMils(newBearingDeg));
+        drawFireMissionOverlay(currentFireMission.target, currentFireMission.observer, newBearingMils, newDist);
+
         // Send as message
         var msgText = "ADJUST FIRE|" + adjustText.trim() + "|NEW TGT:" + newGrid;
         if (BFT._sendMessage) {
             BFT._sendMessage("BROADCAST", msgText);
         }
         BFT._showToast("Fire adjustment sent: " + adjustText, "warning");
+    }
+
+    function drawFireMissionOverlay(target, observer, bearingMils, range) {
+        var layer = BFT._fireMissionLayer;
+        if (!layer) return;
+        layer.clearLayers();
+
+        // Target crosshair marker
+        L.marker([target.lat, target.lon], {
+            icon: L.divIcon({
+                className: "fm-target-icon",
+                html: "+",
+                iconSize: [24, 24],
+                iconAnchor: [12, 12],
+            }),
+            interactive: false,
+        }).addTo(layer);
+
+        // Observer marker
+        L.circleMarker([observer.lat, observer.lon], {
+            radius: 6, color: "#2196F3", fillColor: "#2196F3", fillOpacity: 0.8, weight: 2,
+        }).addTo(layer);
+
+        // Dashed line from observer to target
+        L.polyline([[observer.lat, observer.lon], [target.lat, target.lon]], {
+            color: "#f44336", weight: 2, dashArray: "8,6", opacity: 0.8,
+        }).addTo(layer);
+
+        // Label at midpoint
+        var midLat = (observer.lat + target.lat) / 2;
+        var midLon = (observer.lon + target.lon) / 2;
+        L.marker([midLat, midLon], {
+            icon: L.divIcon({
+                className: "fm-bearing-label",
+                html: bearingMils + " mils / " + Math.round(range) + "m",
+                iconSize: null,
+                iconAnchor: [0, -8],
+            }),
+            interactive: false,
+        }).addTo(layer);
     }
 
     // Haversine helpers (duplicate to avoid cross-file dependency issues)
