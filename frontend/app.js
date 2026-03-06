@@ -2037,6 +2037,7 @@
             unreadCount = 0;
             updateUnreadBadge();
             if (!historyLoaded) loadHistory();
+            else renderMessages();
         } else {
             chatPanel.classList.add("hidden");
             document.body.classList.remove("chat-open");
@@ -2097,7 +2098,10 @@
             updateUnreadBadge();
             var preview = msg.body.length > 60 ? msg.body.substring(0, 60) + "…" : msg.body;
             showToast(msg.sender + ": " + preview, "info", function () {
+                channelSelect.value = "ALL";
+                currentChannel = "ALL";
                 if (!chatOpen) toggleChat();
+                else renderMessages();
             });
         }
     }
