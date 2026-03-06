@@ -205,6 +205,28 @@ sudo systemctl status bft      # check status
 journalctl -u bft -f           # live logs
 ```
 
+### Updating the Pi
+
+Pull the latest changes and copy them into the install location:
+
+**Frontend/server changes:**
+```bash
+cd blufor-tracker
+git pull
+sudo cp -r frontend server /opt/blufor-tracker/
+sudo systemctl restart bft
+```
+
+**Backend changes (new dependencies):**
+```bash
+cd blufor-tracker
+git pull
+sudo cp -r frontend server /opt/blufor-tracker/
+source /opt/blufor-tracker/.venv/bin/activate
+pip install -r requirements.txt
+sudo systemctl restart bft
+```
+
 ## CLI Options
 
 ```
