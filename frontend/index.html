@@ -86,6 +86,17 @@
     <div id="firemission-panel" class="firemission-panel hidden"></div>
     <div id="advisor-panel" class="advisor-panel hidden"></div>
     <div id="weather-widget" class="weather-widget hidden"></div>
+    <button id="notif-log-btn" class="notif-log-btn" title="Notifications">
+        <span class="notif-log-bell">&#128276;</span><span id="notif-log-badge" class="notif-log-badge hidden">0</span>
+    </button>
+    <div id="notif-log" class="notif-log hidden">
+        <div class="notif-log-header">
+            <strong>Notifications</strong>
+            <button id="notif-log-clear">Clear</button>
+            <button id="notif-log-close">&times;</button>
+        </div>
+        <div id="notif-log-list" class="notif-log-list"></div>
+    </div>
     <div id="toast-container"></div>
     <div id="replay-controls" class="hidden">
         <button id="replay-play">&#9654;</button>
