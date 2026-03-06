@@ -18,7 +18,8 @@
     };
 
     // --- Map setup ---
-    var map = L.map("map", { zoomControl: true }).setView([51.5225, -0.0865], 15);
+    var map = L.map("map", { zoomControl: false }).setView([51.5225, -0.0865], 15);
+    L.control.zoom({ position: "bottomleft" }).addTo(map);
 
     var satellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
         maxZoom: 19,
@@ -49,7 +50,7 @@
         "Topographic": topo,
         "Esri Topo": esriTopo,
         "Dark Streets": darkStreets,
-    }, null, { position: "topright" }).addTo(map);
+    }, null, { position: "bottomleft" }).addTo(map);
 
     // --- Layer groups ---
     var trailLayer = L.layerGroup().addTo(map);
@@ -1797,6 +1798,11 @@
     // Callback so the report panel's X button goes through toggleReports
     BFT._onReportClose = function () { toggleReports(); };
 
+    // Open reports panel programmatically (for toast click-through)
+    BFT._openReports = function () {
+        if (!reportsBtn.classList.contains("active")) toggleReports();
+    };
+
     // ===== ADVISOR PANEL =====
 
     function toggleAdvisor() {
@@ -2005,6 +2011,10 @@
         } else {
             unreadCount++;
             updateUnreadBadge();
+            var preview = msg.body.length > 60 ? msg.body.substring(0, 60) + "…" : msg.body;
+            showToast(msg.sender + ": " + preview, "info", function () {
+                if (!chatOpen) toggleChat();
+            });
         }
     }
 
