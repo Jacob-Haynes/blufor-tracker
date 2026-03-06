@@ -212,6 +212,89 @@
         return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
 
+    // ===== NOTIFICATION LOG =====
+    var notifLog = [];
+    var notifIdCounter = 0;
+    var notifLogBtn = document.getElementById("notif-log-btn");
+    var notifLogPanel = document.getElementById("notif-log");
+    var notifLogBadge = document.getElementById("notif-log-badge");
+    var notifLogList = document.getElementById("notif-log-list");
+    var notifLogOpen = false;
+
+    function addNotifLogEntry(text, type, onclick) {
+        notifLog.push({
+            id: ++notifIdCounter,
+            text: text,
+            type: type || "info",
+            onclick: onclick,
+            timestamp: new Date()
+        });
+        updateNotifBadge();
+        if (notifLogOpen) renderNotifLog();
+    }
+
+    function updateNotifBadge() {
+        if (notifLog.length > 0) {
+            notifLogBadge.textContent = notifLog.length;
+            notifLogBadge.classList.remove("hidden");
+        } else {
+            notifLogBadge.classList.add("hidden");
+        }
+    }
+
+    function renderNotifLog() {
+        notifLogList.innerHTML = "";
+        if (notifLog.length === 0) {
+            var empty = document.createElement("div");
+            empty.className = "notif-log-empty";
+            empty.textContent = "No notifications";
+            notifLogList.appendChild(empty);
+            return;
+        }
+        for (var i = notifLog.length - 1; i >= 0; i--) {
+            (function (entry) {
+                var item = document.createElement("div");
+                item.className = "notif-log-item notif-" + entry.type;
+                var time = document.createElement("span");
+                time.className = "notif-log-time";
+                time.textContent = entry.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                var text = document.createElement("span");
+                text.className = "notif-log-text";
+                text.textContent = entry.text;
+                item.appendChild(time);
+                item.appendChild(text);
+                item.addEventListener("click", function () {
+                    if (entry.onclick) entry.onclick();
+                    notifLog = notifLog.filter(function (e) { return e.id !== entry.id; });
+                    updateNotifBadge();
+                    renderNotifLog();
+                });
+                notifLogList.appendChild(item);
+            })(notifLog[i]);
+        }
+    }
+
+    notifLogBtn.addEventListener("click", function () {
+        notifLogOpen = !notifLogOpen;
+        if (notifLogOpen) {
+            notifLogPanel.classList.remove("hidden");
+            renderNotifLog();
+        } else {
+            notifLogPanel.classList.add("hidden");
+        }
+    });
+
+    document.getElementById("notif-log-close").addEventListener("click", function () {
+        notifLogOpen = false;
+        notifLogPanel.classList.add("hidden");
+    });
+
+    document.getElementById("notif-log-clear").addEventListener("click", function () {
+        notifLog = [];
+        updateNotifBadge();
+        renderNotifLog();
+    });
+
     function showToast(message, type, onclick) {
         type = type || "info";
         var toast = document.createElement("div");
@@ -237,6 +320,7 @@
                 onclick();
                 if (toast.parentNode) toast.parentNode.removeChild(toast);
             });
+            addNotifLogEntry(message, type, onclick);
         }
 
         toastContainer.appendChild(toast);

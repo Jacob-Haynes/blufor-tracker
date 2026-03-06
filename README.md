@@ -42,6 +42,7 @@ Real-time tactical tracker built on [Meshtastic](https://meshtastic.org/) mesh r
 - **Messaging** — broadcast channel, direct messages, HQ channel, message acknowledgement
 - **Canned messages** — pre-set tactical messages for quick sending
 - **SOS alerts** — automatic detection of SOS/PANIC messages with acknowledgement workflow
+- **Notification log** — persistent bottom-right panel collecting actionable alerts (messages, reports, geofence); click to action, auto-removes on dismiss
 - **Mesh bridge** — messages and reports flow bidirectionally between web UI and mesh network
 
 ### Fire Support
