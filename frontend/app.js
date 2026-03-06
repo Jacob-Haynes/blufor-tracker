@@ -59,6 +59,7 @@
     var measureLayer = L.layerGroup().addTo(map);
     var routeLayer = L.layerGroup().addTo(map);
     var controlMeasureLayer = L.layerGroup().addTo(map);
+    var fireMissionLayer = L.layerGroup().addTo(map);
 
     // --- State ---
     var markers = {};
@@ -458,6 +459,11 @@
             labels[report.callsign] = label;
         }
 
+        // Move SOS ring with the node
+        if (sosMarkerOverlays[report.callsign]) {
+            sosMarkerOverlays[report.callsign].setLatLng(latlng);
+        }
+
         if (trailsEnabled) {
             updateTrailForCallsign(report.callsign);
         }
@@ -568,7 +574,6 @@
         formHtml += '<div style="margin-bottom:4px"><label style="font-size:11px;color:#aaa">Type:</label><br><select id="wp-type-select" style="width:100%;padding:3px 6px;background:#16213e;color:#e0e0e0;border:1px solid #444;border-radius:3px;font-size:12px">' + typeOptions + '</select></div>';
         formHtml += '<div style="margin-bottom:4px"><label style="font-size:11px;color:#aaa">Description:</label><br><input id="wp-desc-input" type="text" style="width:100%;padding:3px 6px;background:#16213e;color:#e0e0e0;border:1px solid #444;border-radius:3px;font-size:12px" placeholder="Optional" /></div>';
         formHtml += '<button id="wp-submit-btn" style="padding:4px 12px;background:#2196F3;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:12px;margin-top:2px">Create</button>';
-        formHtml += ' <button id="wp-cancel-btn" style="padding:4px 12px;background:#555;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:12px;margin-top:2px">Cancel</button>';
         formHtml += '</div>';
 
         var popup = L.popup({ closeOnClick: false, autoClose: false })
@@ -576,13 +581,17 @@
             .setContent(formHtml)
             .openOn(map);
 
+        // Exit waypoint mode when popup is closed via × button
+        popup.on("remove", function () {
+            if (waypointPlaceMode) toggleWaypointMode();
+        });
+
         // Defer event binding until popup is in DOM
         setTimeout(function () {
             var nameInput = document.getElementById("wp-name-input");
             var typeSelect = document.getElementById("wp-type-select");
             var descInput = document.getElementById("wp-desc-input");
             var submitBtn = document.getElementById("wp-submit-btn");
-            var cancelBtn = document.getElementById("wp-cancel-btn");
             if (nameInput) nameInput.focus();
 
             if (submitBtn) submitBtn.addEventListener("click", function () {
@@ -605,12 +614,6 @@
                 });
 
                 map.closePopup(popup);
-                toggleWaypointMode();
-            });
-
-            if (cancelBtn) cancelBtn.addEventListener("click", function () {
-                map.closePopup(popup);
-                toggleWaypointMode();
             });
         }, 50);
     }
@@ -662,10 +665,14 @@
         } else {
             playSOSBeep();
             if (!sosMarkerOverlays[alert.callsign]) {
-                var pulse = L.circleMarker([alert.lat, alert.lon], {
-                    radius: 14, color: RED, fillColor: RED, fillOpacity: 0.4, weight: 3, className: "sos-marker",
+                // Use node's current position if available, fall back to alert position
+                var pos = positions[alert.callsign];
+                var ringLat = pos ? pos.lat : alert.lat;
+                var ringLon = pos ? pos.lon : alert.lon;
+                var ring = L.circleMarker([ringLat, ringLon], {
+                    radius: 18, color: RED, fill: false, weight: 3, opacity: 0.9, className: "sos-ring",
                 }).addTo(map);
-                sosMarkerOverlays[alert.callsign] = pulse;
+                sosMarkerOverlays[alert.callsign] = ring;
             }
             if (markers[alert.callsign]) {
                 markers[alert.callsign].setStyle({ color: RED, fillColor: RED });
@@ -1665,10 +1672,14 @@
             fireMissionMode = false;
             document.body.classList.remove("firemission-mode");
         }
+        fireMissionLayer.clearLayers();
     }
 
     // Callback so the fire mission panel's X button goes through toggleFireMissionMode
-    BFT._onFireMissionClose = function () { toggleFireMissionMode(); };
+    BFT._onFireMissionClose = function () {
+        toggleFireMissionMode();
+        fireMissionLayer.clearLayers();
+    };
 
     // ===== CANNED MESSAGE PALETTE =====
 
@@ -2090,6 +2101,7 @@
     BFT._sendMessage = sendMessageText;
     BFT._getPositions = function () { return positions; };
     BFT._setFireMissionClickTarget = function (mode) { fireMissionClickTarget = mode; };
+    BFT._fireMissionLayer = fireMissionLayer;
 
     // Right-click context menu for grid ref
     map.on("contextmenu", function (e) {
