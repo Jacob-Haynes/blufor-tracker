@@ -41,13 +41,23 @@
     };
 
     function renderFireMissionPanel() {
+        // Build observer node options
+        var nodeOptions = '<option value="">-- Select node --</option>';
+        if (BFT._getPositions) {
+            var pos = BFT._getPositions();
+            Object.keys(pos).sort().forEach(function (cs) {
+                nodeOptions += '<option value="' + cs + '">' + cs + '</option>';
+            });
+        }
+
         var html = '<div class="fm-header">';
         html += '<strong>Fire Mission</strong>';
         html += '<button id="fm-close-btn" class="fm-close">&times;</button>';
         html += '</div>';
         html += '<div class="fm-body">';
         html += '<div class="fm-row"><label>Target Grid:</label><input type="text" id="fm-target-grid" class="fm-input" placeholder="Click map to set" /></div>';
-        html += '<div class="fm-row"><label>Observer Grid:</label><input type="text" id="fm-observer-grid" class="fm-input" placeholder="Select node or click" /></div>';
+        html += '<div class="fm-click-btns"><button id="fm-set-target" class="fm-click-btn active">Map click: Target</button><button id="fm-set-observer" class="fm-click-btn">Map click: Observer</button></div>';
+        html += '<div class="fm-row"><label>Observer Grid:</label><input type="text" id="fm-observer-grid" class="fm-input" placeholder="Select node or click" /><select id="fm-node-select" class="fm-node-select">' + nodeOptions + '</select></div>';
         html += '<div class="fm-row"><label>Target Description:</label><input type="text" id="fm-target-desc" class="fm-input" placeholder="e.g. Enemy FP in treeline" /></div>';
         html += '<div class="fm-row"><label>Effect:</label><select id="fm-effect" class="fm-input">';
         html += '<option value="neutralise">Neutralise</option><option value="suppress">Suppress</option>';
@@ -75,6 +85,33 @@
         document.getElementById("fm-calculate-btn").addEventListener("click", calculateFireMission);
         document.getElementById("fm-send-btn").addEventListener("click", sendFireMission);
         document.getElementById("fm-send-adjust-btn").addEventListener("click", sendAdjustment);
+
+        // Map click target/observer toggle
+        var setTargetBtn = document.getElementById("fm-set-target");
+        var setObserverBtn = document.getElementById("fm-set-observer");
+        setTargetBtn.addEventListener("click", function () {
+            setTargetBtn.classList.add("active");
+            setObserverBtn.classList.remove("active");
+            if (BFT._setFireMissionClickTarget) BFT._setFireMissionClickTarget("target");
+        });
+        setObserverBtn.addEventListener("click", function () {
+            setObserverBtn.classList.add("active");
+            setTargetBtn.classList.remove("active");
+            if (BFT._setFireMissionClickTarget) BFT._setFireMissionClickTarget("observer");
+        });
+
+        // Node dropdown for observer
+        var nodeSelect = document.getElementById("fm-node-select");
+        nodeSelect.addEventListener("change", function () {
+            var cs = nodeSelect.value;
+            if (!cs || !BFT._getPositions) return;
+            var pos = BFT._getPositions();
+            var p = pos[cs];
+            if (p) {
+                var obsInput = document.getElementById("fm-observer-grid");
+                obsInput.value = BFT.formatCoord(p.lat, p.lon, "mgrs");
+            }
+        });
     }
 
     function calculateFireMission() {
