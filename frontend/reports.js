@@ -146,7 +146,18 @@
         }
         if (!found) {
             allReports.push(report);
-            BFT._showToast("Incoming " + (REPORT_DEFS[report.report_type] ? REPORT_DEFS[report.report_type].label : report.report_type) + " from " + report.sender, "warning");
+            BFT._showToast("Incoming " + (REPORT_DEFS[report.report_type] ? REPORT_DEFS[report.report_type].label : report.report_type) + " from " + report.sender, "warning", function () {
+                if (BFT._openReports) BFT._openReports();
+                // Switch to received tab once panel is open
+                setTimeout(function () {
+                    var recvTab = reportPanel.querySelector('[data-tab="received"]');
+                    if (recvTab) {
+                        reportPanel.querySelectorAll(".report-tab").forEach(function (b) { b.classList.remove("active"); });
+                        recvTab.classList.add("active");
+                        renderReceivedTab();
+                    }
+                }, 50);
+            });
         }
         if (reportPanelOpen) renderReceivedTab();
     };
