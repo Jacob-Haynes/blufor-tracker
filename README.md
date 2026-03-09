@@ -1,167 +1,67 @@
-# Blue Force Tracker
+# Mesh↔TAK Bridge
 
-Real-time tactical tracker built on [Meshtastic](https://meshtastic.org/) mesh radios. A Raspberry Pi acts as the HQ node — plug in a Meshtastic radio via USB and all field positions, messages, reports, and mesh health appear on a web map. An optional on-device LLM provides tactical analysis without cloud connectivity.
+Connects Meshtastic mesh radios to ATAK via FreeTAKServer. A Raspberry Pi runs the bridge and TAK server — field operators use ATAK with Meshtastic radios on airplane mode, HQ connects ATAK to the Pi over WiFi.
 
-## How It Works
+## Architecture
 
 ```
-[Phone + Radio]  ~~~mesh~~~  [Phone + Radio]
-        \                        /
-         ~~~~ mesh radio ~~~~
-                  |
-           [Pi + USB Node]
-           + GGUF LLM (optional)
-                  |
-          Web UI (port 8000)
+Field (airplane mode)                    HQ
+[ATAK] ←BT→ [Radio] ~~LoRa~~ [Radio] ←USB→ [Pi]
+                                              ├── FreeTAKServer (TAK server)
+                                              ├── mesh_bridge.py (CoT relay)
+                                              └── WiFi Hotspot (for HQ ATAK)
+
+                                         [ATAK on tablet] ←WiFi→ [Pi]
 ```
 
-- Field operators carry a Meshtastic radio paired to their phone via Bluetooth
-- The Meshtastic app broadcasts GPS positions and text messages over the mesh
-- A Pi with a USB-connected node receives all mesh traffic
-- The web UI displays positions on a map with real-time messaging, reports, and tactical overlays
-- An optional local LLM (GGUF format) analyses the operational picture and provides tactical advice
+- Field operators run ATAK with the Meshtastic plugin — positions and messages go over LoRa
+- A Pi with a USB Meshtastic radio receives all mesh traffic
+- The bridge converts Meshtastic packets to CoT XML and feeds them into FreeTAKServer
+- HQ ATAK connects to FreeTAKServer over the Pi's WiFi hotspot
+- CoT events from HQ (chat, markers) are relayed back out over the mesh
 
-## Features
+## What Gets Bridged
 
-### Mapping & Tracking
-- **Live map** — satellite, topographic (OpenTopoMap), and dark street base layers
-- **Position tracking** — callsign markers, heading, speed, altitude, battery, stale detection
-- **Movement trails** — configurable-age breadcrumb trails for all callsigns
-- **Coordinate systems** — MGRS (primary), BNG (OS Grid), DMS, decimal degrees, mils toggle
-- **Terrain profile** — elevation cross-sections along routes via Open-Meteo API
+| Meshtastic → CoT | CoT → Meshtastic |
+|---|---|
+| Position → PLI (`a-f-G-U-C`) | GeoChat → Text message |
+| Text message → GeoChat (`b-t-f`) | Emergency → SOS text |
+| SOS/PANIC → Emergency (`b-a-o-tbl`) | Marker → Waypoint |
+| Waypoint → Marker (`b-m-p-c`) | |
+| ATAK plugin (portnum 72) → passthrough | |
 
-### Tactical Overlays
-- **Control measures** — phase lines, boundaries, FEBA, LOD, FUP, start lines, axes of advance
-- **Route planning** — multi-waypoint routes with distance/bearing legs
-- **Geofencing** — circle and polygon zones with enter/exit/violation alerts
-- **Waypoints** — RV, objective, danger, checkpoint, rally, TRP markers
-- **Annotations** — freehand lines, polygons, markers, circles (via Leaflet.draw)
-
-### Reports & Messages
-- **Structured reports** — 9-Liner MEDEVAC, AT MIST, SITREP, Contact (SALUTE), METHANE forms
-- **Messaging** — broadcast channel, direct messages, HQ channel, message acknowledgement
-- **Canned messages** — pre-set tactical messages for quick sending
-- **SOS alerts** — automatic detection of SOS/PANIC messages with acknowledgement workflow
-- **Notification log** — persistent bottom-right panel collecting actionable alerts (messages, reports, geofence); click to action, auto-removes on dismiss
-- **Mesh bridge** — messages and reports flow bidirectionally between web UI and mesh network
-
-### Fire Support
-- **Fire mission calculator** — mils-based bearings, target grid, adjustment panel
-
-### Mesh Network
-- **Topology overlay** — SNR/RSSI colour-coded links between nodes
-- **Signal quality** — live mesh health monitoring per link
-
-### LLM Tactical Advisor
-- **On-device inference** — runs a GGUF model locally via llama-cpp-python (no cloud required)
-- **Tactical context** — automatically assembles current positions, reports, messages, mesh health
-- **Quick queries** — SITREP summary, threat assessment, mesh health, unit dispersion, movement analysis
-- **Custom queries** — freeform questions about the operational picture
-
-### Offline & PWA
-- **Service worker** — app shell caching, tile caching (OpenTopoMap priority), API response caching
-- **Offline queue** — messages and reports queue locally and sync when connectivity returns
-- **Installable** — PWA manifest for add-to-homescreen on mobile devices
-
-### Weather
-- **Met Office DataHub** — hourly forecast proxy (temperature, wind, precipitation, visibility)
-
-### Session Recording
-- **Record/replay** — capture all events to JSONL for after-action review
-
-## Quick Start (Development)
+## Quick Start (No Hardware)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m server --simulate
+python -m bridge --simulate
 ```
 
-Open [http://localhost:8000](http://localhost:8000). Five simulated nodes will move around the City of London area.
+Generates fake mesh traffic, converts to CoT, and logs output. Connect FreeTAKServer separately to see positions in ATAK.
 
 ## Quick Start (Live)
 
 ```bash
 source .venv/bin/activate
-python -m server --port /dev/ttyUSB0
+python -m bridge --port /dev/ttyUSB0
 ```
 
-Plug a Meshtastic node into the Pi via USB. Field nodes will appear on the map as they broadcast positions.
-
-## LLM Tactical Advisor
-
-The advisor runs a small quantised model on-device for air-gapped operation.
-
-### Setup
-
-1. Create the models directory and download a GGUF model:
-   ```bash
-   mkdir -p models
-   wget -O models/qwen3-0.6b-q8_0.gguf \
-     "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
-   ```
-2. Install the inference library:
-   ```bash
-   pip install llama-cpp-python
-   ```
-3. Start (or restart) the server — the model loads automatically in the background
-4. Click the **Advisor** button in the web UI to open the panel
-
-On a Pi deployment (`/opt/blufor-tracker`):
-
-```bash
-sudo mkdir -p /opt/blufor-tracker/models
-sudo chown $USER:$USER /opt/blufor-tracker/models
-wget -O /opt/blufor-tracker/models/qwen3-0.6b-q8_0.gguf \
-  "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
-source /opt/blufor-tracker/.venv/bin/activate
-pip install llama-cpp-python
-sudo systemctl restart bft
-```
-
-The advisor automatically includes current unit positions, active SOS alerts, recent reports, messages, routes, control measures, geofence status, and mesh network health in its context.
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `METOFFICE_API_KEY` | Met Office DataHub API key for weather forecasts |
-
-## Project Structure
+## CLI Options
 
 ```
-server/
-  __main__.py       # entry point
-  main.py           # FastAPI app, WebSocket, REST API, weather/elevation proxies
-  models.py         # Pydantic models (Position, Message, Waypoint, SOS, Geofence, Report, Route, ControlMeasure, MeshLink)
-  state.py          # thread-safe stores with async broadcast queues
-  mesh_listener.py  # Meshtastic serial interface, topology extraction, structured report parsing
-  simulator.py      # simulated nodes, messages, SOS, reports, mesh topology
-  llm_engine.py     # GGUF model loader and inference via llama-cpp-python
-  llm_context.py    # tactical context assembler for LLM prompts
-frontend/
-  index.html        # map + UI markup, CDN imports (Leaflet, mgrs.js, proj4.js)
-  style.css         # dark theme, responsive layout
-  app.js            # main app: map, WebSocket, routes, control measures, coord toggle, weather, terrain, canned messages, offline queue, tile caching
-  advisor.js        # LLM tactical advisor panel
-  reports.js        # 9-Liner MEDEVAC, AT MIST, SITREP, Contact (SALUTE), METHANE forms
-  firemission.js    # fire mission calculator, mils-based bearings, adjustment panel
-  coords.js         # MGRS, BNG, DMS, mils coordinate conversions
-  topology.js       # mesh network topology overlay
-  sw.js             # service worker: app shell, tile, and API caching
-  manifest.json     # PWA manifest
-deploy/
-  install.sh        # one-shot Pi installer
-  start.sh          # launcher with auto-detection
-  bft.service       # systemd unit file
-models/             # GGUF model files (gitignored)
-sessions/           # recorded session JSONL files (gitignored)
+python -m bridge [OPTIONS]
+
+  --port PORT       Meshtastic serial port (default: /dev/ttyUSB0)
+  --fts-host HOST   FreeTAKServer host (default: 127.0.0.1)
+  --fts-port PORT   FreeTAKServer TCP port (default: 8087)
+  --simulate        Simulate mesh traffic (no hardware needed)
 ```
 
 ## Pi Deployment
 
-Flash Raspberry Pi OS onto an SD card, then clone and install:
+Flash Raspberry Pi OS, then:
 
 ```bash
 git clone https://github.com/Jacob-Haynes/blufor-tracker.git
@@ -170,105 +70,74 @@ sudo bash deploy/install.sh
 sudo reboot
 ```
 
-The BFT server starts automatically on boot. Plug in a Meshtastic node and open `http://<pi-ip>:8000`.
+This installs:
+- FreeTAKServer (in its own venv)
+- Mesh bridge + dependencies
+- WiFi hotspot (`BFT-TAK` / `bluforce24`)
+- Systemd services for everything
 
-### Accessing the Pi
+### Networking
 
-**Ethernet cable (recommended for field use)**
+| Interface | IP | Purpose |
+|---|---|---|
+| wlan0 (hotspot) | 192.168.4.1 | ATAK devices connect here |
+| eth0 (direct cable) | 192.168.1.1 | SSH admin (laptop at 192.168.1.2) |
 
-Plug an Ethernet cable directly between the Pi and your laptop. No extra config needed if SSH is already enabled.
-
-```bash
-ssh pi@raspberrypi.local
-```
-
-Then access the BFT UI from your laptop by port-forwarding:
-
-```bash
-ssh -L 8000:localhost:8000 pi@raspberrypi.local
-```
-
-Open `http://localhost:8000` in your browser.
-
-**WiFi SSH**
-
-If the Pi is on the same WiFi network as your laptop, `ssh pi@raspberrypi.local` works directly. Open the BFT UI at `http://raspberrypi.local:8000`.
-
-**Phone tethering note:** `.local` hostname resolution (mDNS) does not work over phone hotspots — the phone blocks multicast between connected devices. You have to do some fun stuff working out the ip of the phone and pi and ssh that way...
+Both work simultaneously. If the Pi is on an existing network instead, FTS binds `0.0.0.0` — ATAK connects on whatever IP the Pi has.
 
 ### Commands
 
 ```bash
-sudo systemctl start bft       # start the service
-sudo systemctl stop bft        # stop
-sudo systemctl restart bft     # restart (e.g. after plugging in a node)
-sudo systemctl status bft      # check status
-journalctl -u bft -f           # live logs
+sudo systemctl start fts mesh-bridge    # start services
+sudo systemctl stop mesh-bridge         # stop bridge
+journalctl -u mesh-bridge -f            # bridge logs
+journalctl -u fts -f                    # FTS logs
 ```
 
-### Updating the Pi
+### Updating
 
-Pull the latest changes and copy them into the install location:
-
-**Frontend/server changes:**
 ```bash
-cd blufor-tracker
-git pull
-sudo cp -r frontend server /opt/blufor-tracker/
-sudo systemctl restart bft
+cd blufor-tracker && git pull
+sudo cp -r bridge deploy /opt/blufor-tracker/
+sudo systemctl restart mesh-bridge
 ```
 
-**Backend changes (new dependencies):**
-```bash
-cd blufor-tracker
-git pull
-sudo cp -r frontend server /opt/blufor-tracker/
-source /opt/blufor-tracker/.venv/bin/activate
-pip install -r requirements.txt
-sudo systemctl restart bft
-```
+## ATAK Setup
 
-## CLI Options
+### Field Operators (Mesh)
 
-```
-python -m server [OPTIONS]
+1. Install ATAK-CIV on Android
+2. Install Meshtastic app + [ATAK Meshtastic plugin](https://github.com/meshtastic/ATAK-Plugin)
+3. Pair Meshtastic radio via Bluetooth
+4. In Meshtastic app: set channel + encryption key (must match all radios)
+5. In ATAK: enable Meshtastic plugin, configure channel
+6. Phone goes on airplane mode — all comms over LoRa
 
-  --simulate          Run with simulated nodes (no hardware needed)
-  --port PORT         Serial port for Meshtastic node (default: /dev/ttyUSB0)
-  --host HOST         Bind address (default: 0.0.0.0)
-  --web-port PORT     HTTP port (default: 8000)
-```
+### HQ (WiFi to Pi)
 
-## Field Setup
+1. Install ATAK-CIV on tablet
+2. Connect to Pi WiFi hotspot (`BFT-TAK`)
+3. In ATAK → Settings → Network → TAK Servers → Add:
+   - Host: `192.168.4.1`
+   - Port: `8087`
+   - Protocol: TCP
+4. Field positions appear on the HQ ATAK map
 
-Each operator needs:
-
-1. A **Meshtastic radio** (T-Beam, Heltec, RAK, etc.)
-2. The **Meshtastic app** (Android / iOS) paired via Bluetooth
-3. **Position sharing enabled** in the app (on by default)
-4. The node's **short name** set to their callsign (e.g. "ALPHA-1")
-
-All nodes must be on the **same mesh channel and encryption key**.
-
-### Messaging from the Field
-
-Operators send messages using the Meshtastic app's built-in chat:
-
-- **Channel message** — appears as BROADCAST in the web UI
-- **Direct message to the Pi's node** — appears in the HQ channel
-- **Direct message to another node** — appears in that callsign's DM channel
-
-Messages sent from the web UI as HQ are transmitted back out over the mesh.
-
-### Structured Reports over Mesh
-
-Field operators can send structured reports as text messages using the format:
+## Project Structure
 
 ```
-9LINER:line_1=value|line_2=value|...
-SITREP:field=value|field=value|...
-CONTACT:field=value|field=value|...
-MIST:field=value|field=value|...
+bridge/
+  __main__.py       # entry point
+  mesh_bridge.py    # Meshtastic serial ↔ FTS TCP, simulator
+  cot_converter.py  # CoT XML ↔ Meshtastic packet conversion
+deploy/
+  install.sh        # Pi installer (FTS + bridge + hotspot)
+  start.sh          # launcher with auto-detection
+  mesh-bridge.service
+  fts.service
+  hostapd.conf      # WiFi hotspot config
+  dnsmasq.conf      # DHCP config
+archive/
+  server/           # original BFT web server (archived)
+  frontend/         # original BFT web UI (archived)
 ```
-
-These are automatically parsed and displayed in the reports panel.
