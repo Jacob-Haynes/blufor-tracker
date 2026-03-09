@@ -1,0 +1,14 @@
+[Unit]
+Description=FreeTAKServer
+After=network.target
+
+[Service]
+Type=simple
+User=jhh-pi
+ExecStart=/opt/blufor-tracker/.fts-venv/bin/python -m FreeTAKServer.controllers.services.FTS
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

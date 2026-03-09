@@ -1,6 +1,7 @@
 [Unit]
-Description=Blue Force Tracker
-After=network.target
+Description=Meshtastic TAK Bridge
+After=network.target fts.service
+Wants=fts.service
 
 [Service]
 Type=simple

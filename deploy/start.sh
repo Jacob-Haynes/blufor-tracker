@@ -12,8 +12,8 @@ done
 
 if [ -z "$PORT" ]; then
     echo "No Meshtastic device found — starting in simulation mode"
-    exec python -m server --simulate --host 0.0.0.0 --web-port 8000
+    exec python -m bridge --simulate
 else
     echo "Found Meshtastic device at $PORT"
-    exec python -m server --port "$PORT" --host 0.0.0.0 --web-port 8000
+    exec python -m bridge --port "$PORT"
 fi

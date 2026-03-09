@@ -1,5 +1,2 @@
-fastapi
-uvicorn[standard]
 meshtastic
-pydantic
-llama-cpp-python
+takproto
