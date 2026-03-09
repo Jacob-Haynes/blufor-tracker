@@ -96,15 +96,7 @@ class MeshBridge:
                     logger.debug("Battery %s: %.0f%%", callsign, battery)
                 return
 
-            # ATAK_PLUGIN (portnum 72): forward raw protobuf to FTS as-is
-            if portnum == "ATAK_PLUGIN" or decoded.get("portnum_raw") == 72:
-                raw = decoded.get("payload", b"")
-                if raw:
-                    logger.info("ATAK plugin passthrough from %s (%d bytes)", callsign, len(raw))
-                    self._send_to_fts_raw(raw)
-                return
-
-            # Convert to CoT XML
+            # Convert to CoT XML (handles all portnums including ATAK_PLUGIN)
             cot_xml = meshtastic_to_cot_xml(packet, _battery_cache)
             if cot_xml is None:
                 return
@@ -132,17 +124,6 @@ class MeshBridge:
             logger.warning("FTS connection lost, reconnecting")
             self._fts_sock = None
             self._connect_fts()
-
-    def _send_to_fts_raw(self, data: bytes):
-        try:
-            if self._fts_sock is None:
-                self._connect_fts()
-            if self._fts_sock is None:
-                return
-            self._fts_sock.sendall(data)
-        except (OSError, BrokenPipeError):
-            logger.warning("FTS connection lost, reconnecting")
-            self._fts_sock = None
 
     def _connect_fts(self):
         try:

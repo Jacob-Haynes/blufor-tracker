@@ -1,9 +1,14 @@
 """Pure conversion functions: Meshtastic packets ↔ CoT XML."""
 
+import logging
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+
+from meshtastic.protobuf import atak_pb2
+
+logger = logging.getLogger(__name__)
 
 # Stale time defaults (seconds)
 PLI_STALE = 120
@@ -88,7 +93,9 @@ def meshtastic_to_cot_xml(
     from_id = str(packet.get("fromId", packet.get("from", "unknown")))
     callsign = packet.get("_callsign", from_id)
 
-    if portnum == "POSITION_APP":
+    if portnum == "ATAK_PLUGIN" or decoded.get("portnum_raw") == 72:
+        return _takpacket_to_cot(decoded, callsign)
+    elif portnum == "POSITION_APP":
         return _position_to_cot(decoded, callsign, battery_cache)
     elif portnum == "TEXT_MESSAGE_APP":
         text = decoded.get("text", "")
@@ -101,6 +108,83 @@ def meshtastic_to_cot_xml(
     elif portnum == "WAYPOINT_APP":
         return _waypoint_to_cot(decoded, callsign)
 
+    return None
+
+
+def _takpacket_to_cot(decoded: dict, callsign: str) -> str | None:
+    """Convert a TAKPacket protobuf (portnum 72) to CoT XML."""
+    raw = decoded.get("payload", b"")
+    if not raw:
+        return None
+
+    try:
+        tak = atak_pb2.TAKPacket()
+        tak.ParseFromString(raw)
+    except Exception:
+        logger.warning("Failed to parse TAKPacket from %s", callsign)
+        return None
+
+    uid = f"{UID_PREFIX}{callsign}"
+
+    # Extract contact callsign if present
+    cs = callsign
+    if tak.HasField("contact") and tak.contact.callsign:
+        cs = tak.contact.callsign
+
+    # Build detail parts common to all types
+    detail_parts = [f'<contact callsign="{_xml_escape(cs)}"/>']
+
+    if tak.HasField("group"):
+        team = atak_pb2.Team.Name(tak.group.team) if tak.group.team else ""
+        role = atak_pb2.MemberRole.Name(tak.group.role) if tak.group.role else ""
+        if team or role:
+            detail_parts.append(f'<__group name="{team}" role="{role}"/>')
+
+    if tak.HasField("status") and tak.status.battery:
+        detail_parts.append(f'<status battery="{tak.status.battery}"/>')
+
+    # PLI — position/location information
+    if tak.HasField("pli"):
+        lat = tak.pli.latitude_i / 1e7
+        lon = tak.pli.longitude_i / 1e7
+        alt = tak.pli.altitude
+        uid = f"{UID_PREFIX}{cs}"
+
+        if tak.pli.speed or tak.pli.course:
+            detail_parts.append(
+                f'<track speed="{tak.pli.speed}" course="{tak.pli.course}"/>'
+            )
+
+        detail_xml = "".join(detail_parts)
+        return build_cot_event("a-f-G-U-C", uid, lat, lon, alt, detail_xml, PLI_STALE)
+
+    # GeoChat
+    if tak.HasField("chat"):
+        uid = f"{UID_PREFIX}chat-{uuid.uuid4().hex[:8]}"
+        to_cs = tak.chat.to_callsign or "All Chat Rooms"
+        chatroom = to_cs if tak.chat.to else "All Chat Rooms"
+
+        detail_parts.append(
+            f'<__chat chatroom="{_xml_escape(chatroom)}"'
+            f' senderCallsign="{_xml_escape(cs)}">'
+            f'<chatgrp uid0="{UID_PREFIX}{cs}"/>'
+            f"</__chat>"
+        )
+        detail_parts.append(
+            f"<remarks>{_xml_escape(tak.chat.message)}</remarks>"
+        )
+
+        detail_xml = "".join(detail_parts)
+        return build_cot_event("b-t-f", uid, 0.0, 0.0, 0.0, detail_xml, CHAT_STALE)
+
+    # Fallback: detail bytes (other CoT types)
+    if tak.detail:
+        uid = f"{UID_PREFIX}{cs}-detail-{uuid.uuid4().hex[:8]}"
+        detail_parts.append(tak.detail.decode("utf-8", errors="replace"))
+        detail_xml = "".join(detail_parts)
+        return build_cot_event("a-f-G-U-C", uid, 0.0, 0.0, 0.0, detail_xml, PLI_STALE)
+
+    logger.debug("TAKPacket from %s had no PLI, chat, or detail", callsign)
     return None
 
 
