@@ -11,6 +11,7 @@ from pubsub import pub
 
 from bridge.cot_converter import (
     UID_PREFIX,
+    CotStreamParser,
     cot_xml_to_meshtastic,
     meshtastic_to_cot_xml,
 )
@@ -30,14 +31,40 @@ _MESH_SEND_INTERVAL = 1.0  # seconds
 
 
 class MeshBridge:
-    def __init__(self, port: str, fts_host: str, fts_port: int, simulate: bool):
+    def __init__(
+        self,
+        port: str,
+        fts_host: str,
+        fts_port: int,
+        simulate: bool,
+        upstream_host: str | None = None,
+        upstream_port: int = 8087,
+        upstream_tls: bool = False,
+        upstream_certfile: str | None = None,
+        upstream_cafile: str | None = None,
+    ):
         self.port = port
         self.fts_host = fts_host
         self.fts_port = fts_port
         self.simulate = simulate
         self._interface = None
         self._fts_sock: socket.socket | None = None
+        self._fts_lock = threading.Lock()
         self._running = False
+
+        # Upstream relay (optional)
+        self._upstream = None
+        if upstream_host:
+            from bridge.upstream_relay import UpstreamRelay
+
+            self._upstream = UpstreamRelay(
+                host=upstream_host,
+                port=upstream_port,
+                tls=upstream_tls,
+                certfile=upstream_certfile,
+                cafile=upstream_cafile,
+                downstream_callback=self._handle_upstream_event,
+            )
 
     def start(self):
         self._running = True
@@ -50,6 +77,9 @@ class MeshBridge:
 
         threading.Thread(target=self._fts_reader_loop, daemon=True).start()
 
+        if self._upstream:
+            self._upstream.start()
+
         logger.info("Bridge started — press Ctrl+C to stop")
         try:
             while self._running:
@@ -58,6 +88,8 @@ class MeshBridge:
         except KeyboardInterrupt:
             logger.info("Shutting down")
             self._running = False
+            if self._upstream:
+                self._upstream.stop()
 
     def _connect_meshtastic(self):
         from meshtastic.serial_interface import SerialInterface
@@ -109,21 +141,25 @@ class MeshBridge:
             logger.info("Mesh→FTS: %s from %s [%s]", portnum, callsign, uid or "?")
             self._send_to_fts(cot_xml)
 
+            if self._upstream:
+                self._upstream.send(cot_xml)
+
         except Exception:
             logger.exception("Error processing mesh packet")
 
     def _send_to_fts(self, cot_xml: str):
-        try:
-            if self._fts_sock is None:
+        with self._fts_lock:
+            try:
+                if self._fts_sock is None:
+                    self._connect_fts()
+                if self._fts_sock is None:
+                    logger.warning("No FTS connection, dropping CoT")
+                    return
+                self._fts_sock.sendall(cot_xml.encode("utf-8"))
+            except (OSError, BrokenPipeError):
+                logger.warning("FTS connection lost, reconnecting")
+                self._fts_sock = None
                 self._connect_fts()
-            if self._fts_sock is None:
-                logger.warning("No FTS connection, dropping CoT")
-                return
-            self._fts_sock.sendall(cot_xml.encode("utf-8"))
-        except (OSError, BrokenPipeError):
-            logger.warning("FTS connection lost, reconnecting")
-            self._fts_sock = None
-            self._connect_fts()
 
     def _connect_fts(self):
         try:
@@ -141,7 +177,7 @@ class MeshBridge:
 
     def _fts_reader_loop(self):
         """Read streaming CoT events from FTS and relay to mesh."""
-        buf = ""
+        parser = CotStreamParser()
         while self._running:
             if self._fts_sock is None:
                 self._connect_fts()
@@ -157,20 +193,7 @@ class MeshBridge:
                     time.sleep(2)
                     continue
 
-                buf += data.decode("utf-8", errors="replace")
-
-                # Split on </event> to extract complete CoT events
-                while "</event>" in buf:
-                    end = buf.index("</event>") + len("</event>")
-                    event_xml = buf[:end].strip()
-                    buf = buf[end:]
-
-                    # Find the start of the event
-                    start = event_xml.rfind("<event")
-                    if start < 0:
-                        continue
-                    event_xml = event_xml[start:]
-
+                for event_xml in parser.feed(data.decode("utf-8", errors="replace")):
                     self._handle_fts_event(event_xml)
 
             except socket.timeout:
@@ -193,6 +216,18 @@ class MeshBridge:
 
         logger.info("FTS→Mesh: %s [%s]", mesh_pkt.get("portnum", "?"), uid or "?")
         self._send_to_mesh(mesh_pkt)
+
+    # ── Upstream → Local FTS ─────────────────────────────────────────
+
+    def _handle_upstream_event(self, cot_xml: str):
+        """Downstream callback: inject CoT from upstream into local FTS."""
+        uid = self._extract_uid(cot_xml)
+        if uid and uid.startswith(UID_PREFIX):
+            return
+        if uid and self._is_duplicate(uid):
+            return
+        logger.info("Upstream→Local: [%s]", uid or "?")
+        self._send_to_fts(cot_xml)
 
     def _send_to_mesh(self, mesh_pkt: dict):
         global _last_mesh_send
@@ -340,6 +375,13 @@ def parse_args():
     parser.add_argument("--fts-host", default="127.0.0.1", help="FreeTAKServer host")
     parser.add_argument("--fts-port", type=int, default=8087, help="FreeTAKServer port")
     parser.add_argument("--simulate", action="store_true", help="Simulate mesh traffic (no hardware)")
+
+    upstream = parser.add_argument_group("upstream TAK server (optional)")
+    upstream.add_argument("--upstream-host", default=None, help="Remote TAK server host (enables upstream relay)")
+    upstream.add_argument("--upstream-port", type=int, default=8087, help="Remote TAK server port")
+    upstream.add_argument("--upstream-tls", action="store_true", help="Use TLS for upstream connection")
+    upstream.add_argument("--upstream-certfile", default=None, help="Client certificate PEM for upstream TLS")
+    upstream.add_argument("--upstream-cafile", default=None, help="CA certificate PEM for upstream TLS")
     return parser.parse_args()
 
 
@@ -356,6 +398,11 @@ def main():
         fts_host=args.fts_host,
         fts_port=args.fts_port,
         simulate=args.simulate,
+        upstream_host=args.upstream_host,
+        upstream_port=args.upstream_port,
+        upstream_tls=args.upstream_tls,
+        upstream_certfile=args.upstream_certfile,
+        upstream_cafile=args.upstream_cafile,
     )
     bridge.start()
 
