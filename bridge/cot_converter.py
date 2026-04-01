@@ -312,5 +312,24 @@ def cot_xml_to_meshtastic(xml_str: str) -> dict | None:
     return None
 
 
+class CotStreamParser:
+    """Stateful parser that extracts complete CoT <event> elements from a TCP byte stream."""
+
+    def __init__(self):
+        self._buf = ""
+
+    def feed(self, data: str) -> list[str]:
+        self._buf += data
+        events = []
+        while "</event>" in self._buf:
+            end = self._buf.index("</event>") + len("</event>")
+            chunk = self._buf[:end].strip()
+            self._buf = self._buf[end:]
+            start = chunk.rfind("<event")
+            if start >= 0:
+                events.append(chunk[start:])
+        return events
+
+
 def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")

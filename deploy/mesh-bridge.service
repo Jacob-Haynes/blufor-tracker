@@ -11,6 +11,7 @@ ExecStart=/opt/blufor-tracker/deploy/start.sh
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/blufor-tracker/deploy/upstream.env
 
 [Install]
 WantedBy=multi-user.target
