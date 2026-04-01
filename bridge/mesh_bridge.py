@@ -158,7 +158,7 @@ class MeshBridge:
                 self._fts_sock.sendall(cot_xml.encode("utf-8"))
             except (OSError, BrokenPipeError):
                 logger.warning("FTS connection lost, reconnecting")
-                self._fts_sock = None
+                self._close_fts_sock()
                 self._connect_fts()
 
     def _connect_fts(self):
@@ -173,23 +173,37 @@ class MeshBridge:
             logger.warning("Cannot connect to FTS at %s:%d: %s", self.fts_host, self.fts_port, e)
             self._fts_sock = None
 
+    def _close_fts_sock(self):
+        if self._fts_sock:
+            try:
+                self._fts_sock.close()
+            except OSError:
+                pass
+            self._fts_sock = None
+
     # ── FTS → Meshtastic ──────────────────────────────────────────────
 
     def _fts_reader_loop(self):
         """Read streaming CoT events from FTS and relay to mesh."""
         parser = CotStreamParser()
         while self._running:
-            if self._fts_sock is None:
-                self._connect_fts()
-                if self._fts_sock is None:
+            with self._fts_lock:
+                sock = self._fts_sock
+
+            if sock is None:
+                with self._fts_lock:
+                    self._connect_fts()
+                    sock = self._fts_sock
+                if sock is None:
                     time.sleep(5)
                     continue
 
             try:
-                data = self._fts_sock.recv(4096)
+                data = sock.recv(4096)
                 if not data:
                     logger.warning("FTS connection closed")
-                    self._fts_sock = None
+                    with self._fts_lock:
+                        self._close_fts_sock()
                     time.sleep(2)
                     continue
 
@@ -200,7 +214,8 @@ class MeshBridge:
                 continue
             except OSError:
                 logger.warning("FTS read error, reconnecting")
-                self._fts_sock = None
+                with self._fts_lock:
+                    self._close_fts_sock()
                 time.sleep(2)
 
     def _handle_fts_event(self, cot_xml: str):

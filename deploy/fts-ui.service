@@ -6,6 +6,7 @@ Wants=fts.service
 [Service]
 Type=simple
 User=jhh-pi
+# If this fails, check the installed module name: pip show freetakserver-ui
 ExecStart=/opt/blufor-tracker/.fts-venv/bin/python -c "from FreeTAKServer_UI import run; run.app.run(host='0.0.0.0', port=5000)"
 Restart=always
 RestartSec=5
