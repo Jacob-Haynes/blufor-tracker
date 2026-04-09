@@ -27,10 +27,23 @@ sudo -u "$USER" python3 -m venv "$APP_DIR/.venv"
 sudo -u "$USER" "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
 sudo -u "$USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 
-# 4. FreeTAKServer (separate venv if needed)
+# 4. FreeTAKServer (separate venv — needs Python <=3.12)
 echo "[4/8] Installing FreeTAKServer..."
 FTS_VENV="$APP_DIR/.fts-venv"
-sudo -u "$USER" python3 -m venv "$FTS_VENV"
+FTS_PYTHON=""
+for py in python3.11 python3.12; do
+    if command -v "$py" &>/dev/null; then
+        FTS_PYTHON="$py"
+        break
+    fi
+done
+if [ -z "$FTS_PYTHON" ]; then
+    echo "ERROR: FreeTAKServer requires Python 3.11 or 3.12."
+    echo "Install with: sudo apt install python3.11 python3.11-venv"
+    exit 1
+fi
+echo "Using $FTS_PYTHON for FreeTAKServer..."
+sudo -u "$USER" "$FTS_PYTHON" -m venv "$FTS_VENV"
 sudo -u "$USER" "$FTS_VENV/bin/pip" install --upgrade pip -q
 sudo -u "$USER" "$FTS_VENV/bin/pip" install FreeTAKServer -q || {
     echo "WARNING: FreeTAKServer install failed. You may need Python 3.11."
