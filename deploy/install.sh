@@ -13,7 +13,7 @@ echo "=== Mesh↔TAK Bridge — Pi Install ==="
 # 1. System packages
 echo "[1/8] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip git hostapd dnsmasq
+apt-get install -y -qq python3 python3-venv python3-pip git
 
 # 2. Copy project files
 echo "[2/8] Copying project to $APP_DIR..."
@@ -57,22 +57,27 @@ sudo -u "$USER" "$FTS_VENV/bin/pip" install freetakserver-ui -q || {
     echo "Install manually: $FTS_VENV/bin/pip install freetakserver-ui"
 }
 
-# 6. WiFi hotspot
+# 6. WiFi hotspot (NetworkManager on Trixie/Bookworm)
 echo "[6/8] Configuring WiFi hotspot..."
-sed "s/^ssid=.*/ssid=$HOTSPOT_SSID/" "$APP_DIR/deploy/hostapd.conf" > /etc/hostapd/hostapd.conf
-sed "s/^wpa_passphrase=.*/wpa_passphrase=$HOTSPOT_PASS/" -i /etc/hostapd/hostapd.conf
-cp "$APP_DIR/deploy/dnsmasq.conf" /etc/dnsmasq.d/bft-hotspot.conf
 
-# Configure static IP on wlan0
-cat > /etc/network/interfaces.d/wlan0 <<EOF
-auto wlan0
-iface wlan0 inet static
-    address 192.168.4.1
-    netmask 255.255.255.0
-EOF
+# Remove any old-style config
+rm -f /etc/network/interfaces.d/wlan0 2>/dev/null || true
 
-# Point hostapd to config
-sed -i 's|^#\?DAEMON_CONF=.*|DAEMON_CONF="/etc/hostapd/hostapd.conf"|' /etc/default/hostapd 2>/dev/null || true
+# Create hotspot using NetworkManager
+nmcli connection delete bft-hotspot 2>/dev/null || true
+nmcli connection add type wifi ifname wlan0 con-name bft-hotspot \
+    autoconnect yes \
+    wifi.mode ap \
+    wifi.ssid "$HOTSPOT_SSID" \
+    wifi.band bg \
+    wifi.channel 7 \
+    ipv4.addresses 192.168.4.1/24 \
+    ipv4.method shared \
+    wifi-sec.key-mgmt wpa-psk \
+    wifi-sec.psk "$HOTSPOT_PASS"
+
+# Ensure hotspot starts on boot with higher priority
+nmcli connection modify bft-hotspot connection.autoconnect-priority 100
 
 # 7. Systemd units
 echo "[7/8] Installing systemd services..."
@@ -80,7 +85,7 @@ cp "$APP_DIR/deploy/fts.service" /etc/systemd/system/
 cp "$APP_DIR/deploy/fts-ui.service" /etc/systemd/system/
 cp "$APP_DIR/deploy/mesh-bridge.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable hostapd dnsmasq fts fts-ui mesh-bridge
+systemctl enable fts fts-ui mesh-bridge
 
 # 8. Serial port access
 echo "[8/8] Granting serial port access..."
