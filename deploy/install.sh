@@ -50,6 +50,10 @@ sudo -u "$USER" "$FTS_VENV/bin/pip" install FreeTAKServer -q || {
     echo "Install manually: $FTS_VENV/bin/pip install FreeTAKServer"
 }
 
+# Create FTS data directory
+mkdir -p /opt/fts
+chown "$USER:$USER" /opt/fts
+
 # 5. FreeTAKServer-UI (web dashboard)
 echo "[5/8] Installing FreeTAKServer-UI..."
 sudo -u "$USER" "$FTS_VENV/bin/pip" install freetakserver-ui -q || {
