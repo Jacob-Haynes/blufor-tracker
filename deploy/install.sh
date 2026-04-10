@@ -50,9 +50,28 @@ sudo -u "$USER" "$FTS_VENV/bin/pip" install FreeTAKServer -q || {
     echo "Install manually: $FTS_VENV/bin/pip install FreeTAKServer"
 }
 
-# Create FTS data directory
-mkdir -p /opt/fts
-chown "$USER:$USER" /opt/fts
+# Create FTS data directory and config
+mkdir -p /opt/fts/logs
+chown -R "$USER:$USER" /opt/fts
+
+cat > /opt/fts/FTSConfig.yaml <<FTSEOF
+Addresses:
+  FTS_DP_ADDRESS: 0.0.0.0
+  FTS_USER_ADDRESS: 0.0.0.0
+  FTS_COT_PORT: 8087
+  FTS_SSLCOT_PORT: 8089
+  FTS_DP_PORT: 8080
+  FTS_SSL_DP_PORT: 8443
+  FTS_API_PORT: 19023
+  FTS_FED_PORT: 9000
+  FTS_API_ADDRESS: 0.0.0.0
+FileSystem:
+  FTS_DB_PATH: /opt/fts/FTSDataBase.db
+  FTS_MAINPATH: /opt/fts
+  FTS_LOGPATH: /opt/fts/logs
+  FTS_COT_TO_DB: true
+FTSEOF
+chown "$USER:$USER" /opt/fts/FTSConfig.yaml
 
 # 5. FreeTAKServer-UI (web dashboard)
 echo "[5/8] Installing FreeTAKServer-UI..."
