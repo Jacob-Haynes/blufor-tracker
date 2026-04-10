@@ -1,88 +1,78 @@
 #!/usr/bin/env bash
-# Run this once on the Pi to install the Mesh↔TAK bridge.
+# Run this once on the Pi to install the Mesh↔TAK bridge + OpenTAKServer.
 # Usage: sudo bash deploy/install.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
 APP_DIR="/opt/blufor-tracker"
 USER="jhh-pi"
+USER_HOME=$(eval echo "~$USER")
 HOTSPOT_SSID="${HOTSPOT_SSID:-BFT-TAK}"
 HOTSPOT_PASS="${HOTSPOT_PASS:-bluforce24}"
 
 echo "=== Mesh↔TAK Bridge — Pi Install ==="
 
 # 1. System packages
-echo "[1/8] Installing system packages..."
+echo "[1/6] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip git
+apt-get install -y -qq python3 python3-venv python3-pip git curl
 
 # 2. Copy project files
-echo "[2/8] Copying project to $APP_DIR..."
+echo "[2/6] Copying project to $APP_DIR..."
 mkdir -p "$APP_DIR"
-cp -r bridge requirements.txt deploy "$APP_DIR/"
+cp -r "$REPO_DIR/bridge" "$REPO_DIR/requirements.txt" "$REPO_DIR/deploy" "$APP_DIR/"
 chown -R "$USER:$USER" "$APP_DIR"
 
 # 3. Bridge venv + deps
-echo "[3/8] Setting up bridge Python environment..."
+echo "[3/6] Setting up bridge Python environment..."
 sudo -u "$USER" python3 -m venv "$APP_DIR/.venv"
 sudo -u "$USER" "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
 sudo -u "$USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 
-# 4. FreeTAKServer (separate venv — needs Python <=3.12)
-echo "[4/8] Installing FreeTAKServer..."
-FTS_VENV="$APP_DIR/.fts-venv"
-FTS_PYTHON=""
-for py in python3.11 python3.12; do
-    if command -v "$py" &>/dev/null; then
-        FTS_PYTHON="$py"
-        break
+# 4. OpenTAKServer
+echo "[4/6] Installing OpenTAKServer..."
+if systemctl is-active --quiet opentakserver 2>/dev/null; then
+    echo "OpenTAKServer already installed and running — skipping."
+else
+    echo "Running OpenTAKServer Pi installer as $USER..."
+    echo "This installs PostgreSQL, RabbitMQ, nginx, and OpenTAKServer."
+    sudo -u "$USER" bash -c 'curl https://i.opentakserver.io/raspberry_pi_installer -Ls | bash -'
+
+    # Configure OTS to listen on port 8087 (standard TAK port, matches bridge default)
+    OTS_CONFIG="$USER_HOME/ots/config.yml"
+    if [ -f "$OTS_CONFIG" ]; then
+        echo "Configuring OpenTAKServer TCP port to 8087..."
+        if grep -q "OTS_TCP_STREAMING_PORT" "$OTS_CONFIG"; then
+            sed -i 's/OTS_TCP_STREAMING_PORT:.*/OTS_TCP_STREAMING_PORT: 8087/' "$OTS_CONFIG"
+        else
+            echo "OTS_TCP_STREAMING_PORT: 8087" >> "$OTS_CONFIG"
+        fi
+    else
+        # Config doesn't exist yet — OTS creates it on first start
+        # Start once to generate config, then modify
+        echo "Starting OpenTAKServer to generate config..."
+        systemctl start opentakserver || true
+        sleep 5
+        systemctl stop opentakserver || true
+        if [ -f "$OTS_CONFIG" ]; then
+            if grep -q "OTS_TCP_STREAMING_PORT" "$OTS_CONFIG"; then
+                sed -i 's/OTS_TCP_STREAMING_PORT:.*/OTS_TCP_STREAMING_PORT: 8087/' "$OTS_CONFIG"
+            else
+                echo "OTS_TCP_STREAMING_PORT: 8087" >> "$OTS_CONFIG"
+            fi
+        else
+            mkdir -p "$USER_HOME/ots"
+            cat > "$OTS_CONFIG" <<OTSEOF
+OTS_TCP_STREAMING_PORT: 8087
+OTSEOF
+            chown "$USER:$USER" "$OTS_CONFIG"
+        fi
     fi
-done
-if [ -z "$FTS_PYTHON" ]; then
-    echo "ERROR: FreeTAKServer requires Python 3.11 or 3.12."
-    echo "Install with: sudo apt install python3.11 python3.11-venv"
-    exit 1
 fi
-echo "Using $FTS_PYTHON for FreeTAKServer..."
-sudo -u "$USER" "$FTS_PYTHON" -m venv "$FTS_VENV"
-sudo -u "$USER" "$FTS_VENV/bin/pip" install --upgrade pip -q
-sudo -u "$USER" "$FTS_VENV/bin/pip" install FreeTAKServer -q || {
-    echo "WARNING: FreeTAKServer install failed. You may need Python 3.11."
-    echo "Install manually: $FTS_VENV/bin/pip install FreeTAKServer"
-}
-sudo -u "$USER" "$FTS_VENV/bin/pip" install colorama==0.4.6 dnspython eventlet greenlet --upgrade -q
 
-# Create FTS data directory and config
-mkdir -p /opt/fts/logs
-chown -R "$USER:$USER" /opt/fts
-
-cat > /opt/fts/FTSConfig.yaml <<FTSEOF
-Addresses:
-  FTS_DP_ADDRESS: 0.0.0.0
-  FTS_USER_ADDRESS: 0.0.0.0
-  FTS_COT_PORT: 8087
-  FTS_SSLCOT_PORT: 8089
-  FTS_DP_PORT: 8080
-  FTS_SSL_DP_PORT: 8443
-  FTS_API_PORT: 19023
-  FTS_FED_PORT: 9000
-  FTS_API_ADDRESS: 0.0.0.0
-FileSystem:
-  FTS_DB_PATH: /opt/fts/FTSDataBase.db
-  FTS_MAINPATH: /opt/fts
-  FTS_LOGPATH: /opt/fts/logs
-  FTS_COT_TO_DB: true
-FTSEOF
-chown "$USER:$USER" /opt/fts/FTSConfig.yaml
-
-# 5. FreeTAKServer-UI (web dashboard)
-echo "[5/8] Installing FreeTAKServer-UI..."
-sudo -u "$USER" "$FTS_VENV/bin/pip" install freetakserver-ui -q || {
-    echo "WARNING: FreeTAKServer-UI install failed."
-    echo "Install manually: $FTS_VENV/bin/pip install freetakserver-ui"
-}
-
-# 6. WiFi hotspot (NetworkManager on Trixie/Bookworm)
-echo "[6/8] Configuring WiFi hotspot..."
+# 5. WiFi hotspot (NetworkManager on Trixie/Bookworm)
+echo "[5/6] Configuring WiFi hotspot..."
 
 # Remove any old-style config
 rm -f /etc/network/interfaces.d/wlan0 2>/dev/null || true
@@ -103,16 +93,13 @@ nmcli connection add type wifi ifname wlan0 con-name bft-hotspot \
 # Ensure hotspot starts on boot with higher priority
 nmcli connection modify bft-hotspot connection.autoconnect-priority 100
 
-# 7. Systemd units
-echo "[7/8] Installing systemd services..."
-cp "$APP_DIR/deploy/fts.service" /etc/systemd/system/
-cp "$APP_DIR/deploy/fts-ui.service" /etc/systemd/system/
+# 6. Systemd + permissions
+echo "[6/6] Installing systemd services and permissions..."
 cp "$APP_DIR/deploy/mesh-bridge.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable fts fts-ui mesh-bridge
+systemctl enable mesh-bridge
 
-# 8. Serial port access
-echo "[8/8] Granting serial port access..."
+# Serial port access for Meshtastic
 usermod -aG dialout "$USER"
 
 # Make start script executable
@@ -122,20 +109,17 @@ echo ""
 echo "=== Install complete ==="
 echo ""
 echo "Services:"
-echo "  FreeTAKServer  → fts.service"
-echo "  FTS Web UI     → fts-ui.service (http://192.168.4.1:5000)"
+echo "  OpenTAKServer  → opentakserver.service (CoT TCP :8087)"
 echo "  Mesh bridge    → mesh-bridge.service"
-echo "  WiFi hotspot   → hostapd (SSID: $HOTSPOT_SSID)"
+echo "  OTS Web UI     → http://192.168.4.1 (via nginx)"
 echo ""
 echo "WiFi hotspot: $HOTSPOT_SSID / $HOTSPOT_PASS"
-echo "  ATAK devices connect to WiFi, add FTS server at 192.168.4.1:8087"
-echo "  Web UI: http://192.168.4.1:5000 (admin/password)"
-echo ""
-echo "Ethernet admin: set laptop to 192.168.1.2/24, ssh $USER@192.168.1.1"
+echo "  ATAK devices connect to WiFi, add TAK server at 192.168.4.1:8087"
+echo "  Web UI: http://192.168.4.1"
 echo ""
 echo "Commands:"
-echo "  sudo systemctl start fts mesh-bridge   # start now"
-echo "  journalctl -u mesh-bridge -f            # bridge logs"
-echo "  journalctl -u fts -f                    # FTS logs"
+echo "  sudo systemctl start opentakserver mesh-bridge   # start now"
+echo "  journalctl -u mesh-bridge -f                     # bridge logs"
+echo "  journalctl -u opentakserver -f                   # OTS logs"
 echo ""
 echo "Reboot to start all services."
