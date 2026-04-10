@@ -1,7 +1,7 @@
 [Unit]
 Description=Meshtastic TAK Bridge
-After=network.target fts.service
-Wants=fts.service
+After=network.target opentakserver.service
+Wants=opentakserver.service
 
 [Service]
 Type=simple

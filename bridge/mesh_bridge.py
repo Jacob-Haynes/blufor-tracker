@@ -1,4 +1,4 @@
-"""Bidirectional Meshtastic ↔ FreeTAKServer CoT bridge."""
+"""Bidirectional Meshtastic ↔ TAK Server CoT bridge."""
 
 import argparse
 import logging
@@ -34,8 +34,8 @@ class MeshBridge:
     def __init__(
         self,
         port: str,
-        fts_host: str,
-        fts_port: int,
+        tak_host: str,
+        tak_port: int,
         simulate: bool,
         upstream_host: str | None = None,
         upstream_port: int = 8087,
@@ -44,12 +44,12 @@ class MeshBridge:
         upstream_cafile: str | None = None,
     ):
         self.port = port
-        self.fts_host = fts_host
-        self.fts_port = fts_port
+        self.tak_host = tak_host
+        self.tak_port = tak_port
         self.simulate = simulate
         self._interface = None
-        self._fts_sock: socket.socket | None = None
-        self._fts_lock = threading.Lock()
+        self._tak_sock: socket.socket | None = None
+        self._tak_lock = threading.Lock()
         self._running = False
 
         # Upstream relay (optional)
@@ -75,7 +75,7 @@ class MeshBridge:
         else:
             self._connect_meshtastic()
 
-        threading.Thread(target=self._fts_reader_loop, daemon=True).start()
+        threading.Thread(target=self._tak_reader_loop, daemon=True).start()
 
         if self._upstream:
             self._upstream.start()
@@ -107,7 +107,7 @@ class MeshBridge:
                 return user.get("shortName") or user.get("longName") or node_id
         return node_id
 
-    # ── Meshtastic → FTS ──────────────────────────────────────────────
+    # ── Meshtastic → TAK ──────────────────────────────────────────────
 
     def _on_mesh_receive(self, packet, interface=None):
         try:
@@ -138,8 +138,8 @@ class MeshBridge:
             if uid and self._is_duplicate(uid):
                 return
 
-            logger.info("Mesh→FTS: %s from %s [%s]", portnum, callsign, uid or "?")
-            self._send_to_fts(cot_xml)
+            logger.info("Mesh→TAK: %s from %s [%s]", portnum, callsign, uid or "?")
+            self._send_to_tak(cot_xml)
 
             if self._upstream:
                 self._upstream.send(cot_xml)
@@ -147,53 +147,53 @@ class MeshBridge:
         except Exception:
             logger.exception("Error processing mesh packet")
 
-    def _send_to_fts(self, cot_xml: str):
-        with self._fts_lock:
+    def _send_to_tak(self, cot_xml: str):
+        with self._tak_lock:
             try:
-                if self._fts_sock is None:
-                    self._connect_fts()
-                if self._fts_sock is None:
-                    logger.warning("No FTS connection, dropping CoT")
+                if self._tak_sock is None:
+                    self._connect_tak()
+                if self._tak_sock is None:
+                    logger.warning("No TAK connection, dropping CoT")
                     return
-                self._fts_sock.sendall(cot_xml.encode("utf-8"))
+                self._tak_sock.sendall(cot_xml.encode("utf-8"))
             except (OSError, BrokenPipeError):
-                logger.warning("FTS connection lost, reconnecting")
-                self._close_fts_sock()
-                self._connect_fts()
+                logger.warning("TAK connection lost, reconnecting")
+                self._close_tak_sock()
+                self._connect_tak()
 
-    def _connect_fts(self):
+    def _connect_tak(self):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
-            sock.connect((self.fts_host, self.fts_port))
+            sock.connect((self.tak_host, self.tak_port))
             sock.settimeout(None)
-            self._fts_sock = sock
-            logger.info("Connected to FTS at %s:%d", self.fts_host, self.fts_port)
+            self._tak_sock = sock
+            logger.info("Connected to TAK at %s:%d", self.tak_host, self.tak_port)
         except OSError as e:
-            logger.warning("Cannot connect to FTS at %s:%d: %s", self.fts_host, self.fts_port, e)
-            self._fts_sock = None
+            logger.warning("Cannot connect to TAK at %s:%d: %s", self.tak_host, self.tak_port, e)
+            self._tak_sock = None
 
-    def _close_fts_sock(self):
-        if self._fts_sock:
+    def _close_tak_sock(self):
+        if self._tak_sock:
             try:
-                self._fts_sock.close()
+                self._tak_sock.close()
             except OSError:
                 pass
-            self._fts_sock = None
+            self._tak_sock = None
 
-    # ── FTS → Meshtastic ──────────────────────────────────────────────
+    # ── TAK → Meshtastic ──────────────────────────────────────────────
 
-    def _fts_reader_loop(self):
-        """Read streaming CoT events from FTS and relay to mesh."""
+    def _tak_reader_loop(self):
+        """Read streaming CoT events from TAK server and relay to mesh."""
         parser = CotStreamParser()
         while self._running:
-            with self._fts_lock:
-                sock = self._fts_sock
+            with self._tak_lock:
+                sock = self._tak_sock
 
             if sock is None:
-                with self._fts_lock:
-                    self._connect_fts()
-                    sock = self._fts_sock
+                with self._tak_lock:
+                    self._connect_tak()
+                    sock = self._tak_sock
                 if sock is None:
                     time.sleep(5)
                     continue
@@ -201,24 +201,24 @@ class MeshBridge:
             try:
                 data = sock.recv(4096)
                 if not data:
-                    logger.warning("FTS connection closed")
-                    with self._fts_lock:
-                        self._close_fts_sock()
+                    logger.warning("TAK connection closed")
+                    with self._tak_lock:
+                        self._close_tak_sock()
                     time.sleep(2)
                     continue
 
                 for event_xml in parser.feed(data.decode("utf-8", errors="replace")):
-                    self._handle_fts_event(event_xml)
+                    self._handle_tak_event(event_xml)
 
             except socket.timeout:
                 continue
             except OSError:
-                logger.warning("FTS read error, reconnecting")
-                with self._fts_lock:
-                    self._close_fts_sock()
+                logger.warning("TAK read error, reconnecting")
+                with self._tak_lock:
+                    self._close_tak_sock()
                 time.sleep(2)
 
-    def _handle_fts_event(self, cot_xml: str):
+    def _handle_tak_event(self, cot_xml: str):
         # Filter out events that originated from this bridge
         uid = self._extract_uid(cot_xml)
         if uid and uid.startswith(UID_PREFIX):
@@ -229,20 +229,20 @@ class MeshBridge:
         if mesh_pkt is None:
             return
 
-        logger.info("FTS→Mesh: %s [%s]", mesh_pkt.get("portnum", "?"), uid or "?")
+        logger.info("TAK→Mesh: %s [%s]", mesh_pkt.get("portnum", "?"), uid or "?")
         self._send_to_mesh(mesh_pkt)
 
-    # ── Upstream → Local FTS ─────────────────────────────────────────
+    # ── Upstream → Local TAK ─────────────────────────────────────────
 
     def _handle_upstream_event(self, cot_xml: str):
-        """Downstream callback: inject CoT from upstream into local FTS."""
+        """Downstream callback: inject CoT from upstream into local TAK."""
         uid = self._extract_uid(cot_xml)
         if uid and uid.startswith(UID_PREFIX):
             return
         if uid and self._is_duplicate(uid):
             return
         logger.info("Upstream→Local: [%s]", uid or "?")
-        self._send_to_fts(cot_xml)
+        self._send_to_tak(cot_xml)
 
     def _send_to_mesh(self, mesh_pkt: dict):
         global _last_mesh_send
@@ -357,7 +357,7 @@ class MeshBridge:
             cot_xml = meshtastic_to_cot_xml(packet, _battery_cache)
             if cot_xml:
                 logger.info("SIM position: %s @ %.5f, %.5f", cs, lat, lon)
-                self._send_to_fts(cot_xml)
+                self._send_to_tak(cot_xml)
 
             # Occasionally send a chat message
             if random.random() < 0.15:
@@ -379,16 +379,16 @@ class MeshBridge:
                 cot_xml = meshtastic_to_cot_xml(msg_packet, _battery_cache)
                 if cot_xml:
                     logger.info("SIM chat: %s: %s", cs, msg_packet["decoded"]["text"])
-                    self._send_to_fts(cot_xml)
+                    self._send_to_tak(cot_xml)
 
             time.sleep(random.uniform(3, 8))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Meshtastic ↔ FreeTAKServer bridge")
+    parser = argparse.ArgumentParser(description="Meshtastic ↔ TAK Server bridge")
     parser.add_argument("--port", default="/dev/ttyUSB0", help="Meshtastic serial port")
-    parser.add_argument("--fts-host", default="127.0.0.1", help="FreeTAKServer host")
-    parser.add_argument("--fts-port", type=int, default=8087, help="FreeTAKServer port")
+    parser.add_argument("--tak-host", "--fts-host", default="127.0.0.1", help="TAK server host")
+    parser.add_argument("--tak-port", "--fts-port", type=int, default=8087, help="TAK server CoT TCP port")
     parser.add_argument("--simulate", action="store_true", help="Simulate mesh traffic (no hardware)")
 
     upstream = parser.add_argument_group("upstream TAK server (optional)")
@@ -410,8 +410,8 @@ def main():
     args = parse_args()
     bridge = MeshBridge(
         port=args.port,
-        fts_host=args.fts_host,
-        fts_port=args.fts_port,
+        tak_host=args.tak_host,
+        tak_port=args.tak_port,
         simulate=args.simulate,
         upstream_host=args.upstream_host,
         upstream_port=args.upstream_port,
