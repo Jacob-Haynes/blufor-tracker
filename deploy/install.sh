@@ -49,6 +49,7 @@ sudo -u "$USER" "$FTS_VENV/bin/pip" install FreeTAKServer -q || {
     echo "WARNING: FreeTAKServer install failed. You may need Python 3.11."
     echo "Install manually: $FTS_VENV/bin/pip install FreeTAKServer"
 }
+sudo -u "$USER" "$FTS_VENV/bin/pip" install colorama==0.4.6 dnspython eventlet greenlet --upgrade -q
 
 # Create FTS data directory and config
 mkdir -p /opt/fts/logs
