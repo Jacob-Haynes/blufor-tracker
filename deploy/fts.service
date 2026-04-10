@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=jhh-pi
-ExecStart=/opt/blufor-tracker/.fts-venv/bin/python -m FreeTAKServer.controllers.services.FTS -DataPackageIP 0.0.0.0 -AutoStart true
+ExecStart=/opt/blufor-tracker/.fts-venv/bin/python -m FreeTAKServer.controllers.services.FTS --AutoStart true
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
