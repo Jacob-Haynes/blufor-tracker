@@ -281,6 +281,15 @@ class MeshBridge:
                     portNum=mesh_pb2.PortNum.WAYPOINT_APP,
                     wantAck=True,
                 )
+
+            elif portnum == "ATAK_PLUGIN":
+                from meshtastic.protobuf import mesh_pb2
+
+                self._interface.sendData(
+                    mesh_pkt["tak_packet"],
+                    portNum=mesh_pb2.PortNum.ATAK_PLUGIN,
+                    wantAck=True,
+                )
         except Exception:
             logger.exception("Failed to send to mesh")
 
@@ -387,8 +396,8 @@ class MeshBridge:
 def parse_args():
     parser = argparse.ArgumentParser(description="Meshtastic ↔ TAK Server bridge")
     parser.add_argument("--port", default="/dev/ttyUSB0", help="Meshtastic serial port")
-    parser.add_argument("--tak-host", "--fts-host", default="127.0.0.1", help="TAK server host")
-    parser.add_argument("--tak-port", "--fts-port", type=int, default=8087, help="TAK server CoT TCP port")
+    parser.add_argument("--tak-host", default="127.0.0.1", help="TAK server host")
+    parser.add_argument("--tak-port", type=int, default=8087, help="TAK server CoT TCP port")
     parser.add_argument("--simulate", action="store_true", help="Simulate mesh traffic (no hardware)")
 
     upstream = parser.add_argument_group("upstream TAK server (optional)")

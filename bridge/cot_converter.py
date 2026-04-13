@@ -82,6 +82,16 @@ def parse_cot_event(xml_str: str) -> dict | None:
             result["emergency"] = True
             result["emergency_type"] = emergency.get("type", "")
 
+        track = detail.find("track")
+        if track is not None:
+            result["speed"] = float(track.get("speed", 0))
+            result["course"] = float(track.get("course", 0))
+
+        group = detail.find("__group")
+        if group is not None:
+            result["team"] = group.get("name", "")
+            result["role"] = group.get("role", "")
+
     return result
 
 
@@ -277,12 +287,53 @@ def _waypoint_to_cot(decoded: dict, callsign: str) -> str | None:
     return build_cot_event("b-m-p-c", uid, lat, lon, 0.0, detail_xml, MARKER_STALE)
 
 
+def _pli_to_takpacket(parsed: dict) -> dict | None:
+    """Convert a parsed CoT PLI event to a TAKPacket protobuf for mesh relay."""
+    lat = parsed.get("lat", 0)
+    lon = parsed.get("lon", 0)
+    if not lat and not lon:
+        return None
+
+    tak = atak_pb2.TAKPacket()
+
+    # Position
+    tak.pli.latitude_i = int(lat * 1e7)
+    tak.pli.longitude_i = int(lon * 1e7)
+    tak.pli.altitude = int(parsed.get("hae", 0))
+    tak.pli.speed = int(parsed.get("speed", 0))
+    tak.pli.course = int(parsed.get("course", 0))
+
+    # Contact
+    callsign = parsed.get("callsign", parsed.get("uid", "Unknown"))
+    tak.contact.callsign = callsign
+
+    # Team/role
+    team = parsed.get("team", "")
+    role = parsed.get("role", "")
+    if team:
+        try:
+            tak.group.team = atak_pb2.Team.Value(team)
+        except ValueError:
+            pass
+    if role:
+        try:
+            tak.group.role = atak_pb2.MemberRole.Value(role)
+        except ValueError:
+            pass
+
+    return {"portnum": "ATAK_PLUGIN", "tak_packet": tak.SerializeToString()}
+
+
 def cot_xml_to_meshtastic(xml_str: str) -> dict | None:
     parsed = parse_cot_event(xml_str)
     if parsed is None:
         return None
 
     cot_type = parsed["type"]
+
+    # PLI → ATAK_PLUGIN (TAKPacket protobuf)
+    if cot_type == "a-f-G-U-C":
+        return _pli_to_takpacket(parsed)
 
     # GeoChat → TEXT_MESSAGE_APP
     if cot_type == "b-t-f":
