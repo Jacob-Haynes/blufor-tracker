@@ -169,9 +169,28 @@ class MeshBridge:
             sock.settimeout(None)
             self._tak_sock = sock
             logger.info("Connected to TAK at %s:%d", self.tak_host, self.tak_port)
+            # Send self-identification so OTS registers this as an EUD
+            self._send_self_sa()
         except OSError as e:
             logger.warning("Cannot connect to TAK at %s:%d: %s", self.tak_host, self.tak_port, e)
             self._tak_sock = None
+
+    def _send_self_sa(self):
+        """Send a self-SA CoT event to register the bridge as an EUD with OTS."""
+        from bridge.cot_converter import build_cot_event
+        sa_xml = build_cot_event(
+            cot_type="a-f-G-U-C",
+            uid="MESH-BRIDGE",
+            lat=0.0,
+            lon=0.0,
+            detail_xml='<contact callsign="MeshBridge"/><__group name="Cyan" role="Team Lead"/>',
+            stale_seconds=120,
+        )
+        try:
+            self._tak_sock.sendall(sa_xml.encode("utf-8"))
+            logger.info("Sent bridge self-SA to OTS")
+        except OSError:
+            logger.warning("Failed to send self-SA")
 
     def _close_tak_sock(self):
         if self._tak_sock:
