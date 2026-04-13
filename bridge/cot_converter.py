@@ -170,7 +170,9 @@ def _takpacket_to_cot(decoded: dict, callsign: str) -> str | None:
 
     # GeoChat
     if tak.HasField("chat"):
-        sender_uid = f"{UID_PREFIX}{cs}"
+        # Use bridge identity so OTS recognises a connected EUD
+        sender_uid = "MESH-BRIDGE"
+        display_msg = f"[{cs}] {tak.chat.message}"
         to_cs = tak.chat.to_callsign or "All Chat Rooms"
         chatroom = to_cs if tak.chat.to else "All Chat Rooms"
         msg_id = uuid.uuid4().hex[:8]
@@ -188,7 +190,7 @@ def _takpacket_to_cot(decoded: dict, callsign: str) -> str | None:
         )
         detail_parts.append(
             f'<remarks source="{sender_uid}" to="{chatroom}"'
-            f' time="{now_iso}">{_xml_escape(tak.chat.message)}</remarks>'
+            f' time="{now_iso}">{_xml_escape(display_msg)}</remarks>'
         )
 
         detail_xml = "".join(detail_parts)
@@ -258,19 +260,23 @@ def _chat_to_cot(text: str, callsign: str, packet: dict) -> str:
     else:
         chatroom = "TeamChat"
 
-    sender_uid = f"{UID_PREFIX}{callsign}"
+    # Use bridge identity as sender so OTS recognises a connected EUD
+    sender_uid = "MESH-BRIDGE"
+    display_text = f"[{callsign}] {text}"
     msg_id = uuid.uuid4().hex[:8]
     uid = f"GeoChat.{sender_uid}.{chatroom}.{msg_id}"
     now_iso = _isotime()
 
     detail_xml = (
-        f'<__chat chatroom="{chatroom}" senderCallsign="{_xml_escape(callsign)}"'
+        f'<__chat chatroom="{chatroom}" id="{chatroom}"'
+        f' senderCallsign="{_xml_escape(callsign)}" messageId="{msg_id}"'
         f' groupOwner="false">'
         f'<chatgrp uid0="{sender_uid}" uid1="{chatroom}" id="{chatroom}"/>'
         f"</__chat>"
         f'<link uid="{sender_uid}" type="a-f-G-U-C" relation="p-p"/>'
         f'<remarks source="{sender_uid}" to="{chatroom}"'
-        f' time="{now_iso}">{_xml_escape(text)}</remarks>'
+        f' time="{now_iso}">{_xml_escape(display_text)}</remarks>'
+        f'<marti><dest callsign="{chatroom}"/></marti>'
     )
     return build_cot_event("b-t-f", uid, 0.0, 0.0, 0.0, detail_xml, CHAT_STALE)
 
