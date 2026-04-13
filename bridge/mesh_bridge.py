@@ -70,6 +70,9 @@ class MeshBridge:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tx_queue: asyncio.Queue | None = None
 
+        # RabbitMQ direct publish for GeoChat (OTS doesn't relay chat via TCP)
+        self._known_euds: set[str] = set()
+
         # Upstream relay (optional)
         self._upstream = None
         if upstream_host:
@@ -222,6 +225,10 @@ class MeshBridge:
             logger.info("Mesh→TAK: %s from %s [%s]", portnum, callsign, uid or "?")
             self._send_to_tak(cot_xml)
 
+            # OTS doesn't relay GeoChat via TCP streaming — publish directly
+            if uid and uid.startswith("GeoChat"):
+                self._publish_chat_to_euds(cot_xml)
+
             if self._upstream:
                 self._upstream.send(cot_xml)
 
@@ -262,6 +269,28 @@ class MeshBridge:
         )
         self._send_to_tak(sa_xml)
 
+    def _publish_chat_to_euds(self, cot_xml: str):
+        """Publish GeoChat directly to EUD RabbitMQ queues, bypassing OTS."""
+        if not self._known_euds:
+            logger.debug("No known EUDs for chat relay")
+            return
+        try:
+            import pika
+
+            conn = pika.BlockingConnection(
+                pika.ConnectionParameters("localhost")
+            )
+            ch = conn.channel()
+            data = cot_xml.encode("utf-8")
+            for eud_uid in list(self._known_euds):
+                ch.basic_publish(
+                    exchange="", routing_key=eud_uid, body=data
+                )
+                logger.info("Chat→RMQ: published to %s", eud_uid)
+            conn.close()
+        except Exception:
+            logger.warning("Failed to publish chat via RabbitMQ")
+
     # ── TAK → Meshtastic ──────────────────────────────────────────────
 
     def _handle_tak_event(self, cot_xml: str):
@@ -269,6 +298,10 @@ class MeshBridge:
         uid = self._extract_uid(cot_xml)
         if uid and uid.startswith(UID_PREFIX):
             return
+
+        # Track connected EUDs for direct RabbitMQ chat publish
+        if uid and not uid.startswith("GeoChat"):
+            self._known_euds.add(uid)
 
         # Convert to Meshtastic packet
         mesh_pkt = cot_xml_to_meshtastic(cot_xml)
@@ -457,6 +490,7 @@ def parse_args():
 
 def main():
     logging.basicConfig(
+        force=True,
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
