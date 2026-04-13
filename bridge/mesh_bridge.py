@@ -81,10 +81,15 @@ class MeshBridge:
             self._upstream.start()
 
         logger.info("Bridge started — press Ctrl+C to stop")
+        sa_counter = 0
         try:
             while self._running:
                 time.sleep(1)
                 self._cleanup_dedup()
+                sa_counter += 1
+                if sa_counter >= 5:
+                    sa_counter = 0
+                    self._send_self_sa()
         except KeyboardInterrupt:
             logger.info("Shutting down")
             self._running = False
