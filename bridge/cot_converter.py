@@ -170,18 +170,25 @@ def _takpacket_to_cot(decoded: dict, callsign: str) -> str | None:
 
     # GeoChat
     if tak.HasField("chat"):
-        uid = f"{UID_PREFIX}chat-{uuid.uuid4().hex[:8]}"
+        sender_uid = f"{UID_PREFIX}{cs}"
         to_cs = tak.chat.to_callsign or "All Chat Rooms"
         chatroom = to_cs if tak.chat.to else "All Chat Rooms"
+        msg_id = uuid.uuid4().hex[:8]
+        uid = f"GeoChat.{sender_uid}.{chatroom}.{msg_id}"
+        now_iso = _isotime()
 
         detail_parts.append(
             f'<__chat chatroom="{_xml_escape(chatroom)}"'
-            f' senderCallsign="{_xml_escape(cs)}">'
-            f'<chatgrp uid0="{UID_PREFIX}{cs}"/>'
+            f' senderCallsign="{_xml_escape(cs)}" groupOwner="false">'
+            f'<chatgrp uid0="{sender_uid}" uid1="{chatroom}" id="{chatroom}"/>'
             f"</__chat>"
         )
         detail_parts.append(
-            f"<remarks>{_xml_escape(tak.chat.message)}</remarks>"
+            f'<link uid="{sender_uid}" type="a-f-G-U-C" relation="p-p"/>'
+        )
+        detail_parts.append(
+            f'<remarks source="{sender_uid}" to="{chatroom}"'
+            f' time="{now_iso}">{_xml_escape(tak.chat.message)}</remarks>'
         )
 
         detail_xml = "".join(detail_parts)
@@ -244,7 +251,6 @@ def _position_to_cot(
 
 
 def _chat_to_cot(text: str, callsign: str, packet: dict) -> str:
-    uid = f"{UID_PREFIX}chat-{uuid.uuid4().hex[:8]}"
     to_id = str(packet.get("toId", packet.get("to", "")))
 
     if to_id in ("^all", "4294967295", "0xffffffff"):
@@ -252,11 +258,19 @@ def _chat_to_cot(text: str, callsign: str, packet: dict) -> str:
     else:
         chatroom = "TeamChat"
 
+    sender_uid = f"{UID_PREFIX}{callsign}"
+    msg_id = uuid.uuid4().hex[:8]
+    uid = f"GeoChat.{sender_uid}.{chatroom}.{msg_id}"
+    now_iso = _isotime()
+
     detail_xml = (
-        f'<__chat chatroom="{chatroom}" senderCallsign="{callsign}">'
-        f"<chatgrp uid0=\"{UID_PREFIX}{callsign}\"/>"
+        f'<__chat chatroom="{chatroom}" senderCallsign="{_xml_escape(callsign)}"'
+        f' groupOwner="false">'
+        f'<chatgrp uid0="{sender_uid}" uid1="{chatroom}" id="{chatroom}"/>'
         f"</__chat>"
-        f"<remarks>{_xml_escape(text)}</remarks>"
+        f'<link uid="{sender_uid}" type="a-f-G-U-C" relation="p-p"/>'
+        f'<remarks source="{sender_uid}" to="{chatroom}"'
+        f' time="{now_iso}">{_xml_escape(text)}</remarks>'
     )
     return build_cot_event("b-t-f", uid, 0.0, 0.0, 0.0, detail_xml, CHAT_STALE)
 
