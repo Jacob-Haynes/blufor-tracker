@@ -397,7 +397,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Meshtastic ↔ TAK Server bridge")
     parser.add_argument("--port", default="/dev/ttyUSB0", help="Meshtastic serial port")
     parser.add_argument("--tak-host", default="127.0.0.1", help="TAK server host")
-    parser.add_argument("--tak-port", type=int, default=8087, help="TAK server CoT TCP port")
+    parser.add_argument("--tak-port", type=int, default=8088, help="TAK server CoT streaming TCP port")
     parser.add_argument("--simulate", action="store_true", help="Simulate mesh traffic (no hardware)")
 
     upstream = parser.add_argument_group("upstream TAK server (optional)")
