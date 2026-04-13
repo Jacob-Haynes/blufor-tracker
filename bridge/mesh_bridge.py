@@ -268,7 +268,7 @@ class MeshBridge:
                 self._interface.sendText(mesh_pkt["text"], wantAck=True)
 
             elif portnum == "WAYPOINT_APP":
-                from meshtastic.protobuf import mesh_pb2
+                from meshtastic.protobuf import mesh_pb2, portnums_pb2
 
                 wp_data = mesh_pkt["waypoint"]
                 wp_pb = mesh_pb2.Waypoint()
@@ -278,16 +278,16 @@ class MeshBridge:
                 wp_pb.description = wp_data.get("description", "")
                 self._interface.sendData(
                     wp_pb.SerializeToString(),
-                    portNum=mesh_pb2.PortNum.WAYPOINT_APP,
+                    portNum=portnums_pb2.PortNum.WAYPOINT_APP,
                     wantAck=True,
                 )
 
             elif portnum == "ATAK_PLUGIN":
-                from meshtastic.protobuf import mesh_pb2
+                from meshtastic.protobuf import portnums_pb2
 
                 self._interface.sendData(
                     mesh_pkt["tak_packet"],
-                    portNum=mesh_pb2.PortNum.ATAK_PLUGIN,
+                    portNum=portnums_pb2.PortNum.ATAK_PLUGIN,
                     wantAck=True,
                 )
         except Exception:
