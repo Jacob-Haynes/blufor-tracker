@@ -338,6 +338,27 @@ def _pli_to_takpacket(parsed: dict) -> dict | None:
     return {"portnum": "ATAK_PLUGIN", "tak_packet": tak.SerializeToString()}
 
 
+def _chat_to_takpacket(parsed: dict) -> dict | None:
+    """Convert a parsed CoT GeoChat event to a TAKPacket protobuf for mesh relay."""
+    text = parsed.get("remarks", "")
+    if not text:
+        return None
+
+    tak = atak_pb2.TAKPacket()
+
+    sender = parsed.get("sender_callsign", parsed.get("callsign", "Unknown"))
+    tak.contact.callsign = sender
+
+    tak.chat.message = text
+
+    chatroom = parsed.get("chatroom", "All Chat Rooms")
+    if chatroom and chatroom != "All Chat Rooms":
+        tak.chat.to_callsign = chatroom
+        tak.chat.to = chatroom
+
+    return {"portnum": "ATAK_PLUGIN", "tak_packet": tak.SerializeToString()}
+
+
 def cot_xml_to_meshtastic(xml_str: str) -> dict | None:
     parsed = parse_cot_event(xml_str)
     if parsed is None:
@@ -349,12 +370,9 @@ def cot_xml_to_meshtastic(xml_str: str) -> dict | None:
     if cot_type == "a-f-G-U-C":
         return _pli_to_takpacket(parsed)
 
-    # GeoChat → TEXT_MESSAGE_APP
+    # GeoChat → ATAK_PLUGIN (TAKPacket with chat)
     if cot_type == "b-t-f":
-        text = parsed.get("remarks", "")
-        if not text:
-            return None
-        return {"portnum": "TEXT_MESSAGE_APP", "text": text}
+        return _chat_to_takpacket(parsed)
 
     # Emergency → TEXT_MESSAGE_APP with SOS prefix
     if cot_type.startswith("b-a-o-"):
