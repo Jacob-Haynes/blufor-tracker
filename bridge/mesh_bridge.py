@@ -1,17 +1,19 @@
 """Bidirectional Meshtastic ↔ TAK Server CoT bridge."""
 
 import argparse
+import asyncio
 import logging
 import random
-import socket
 import threading
 import time
+from configparser import ConfigParser
 
+import pytak
 from pubsub import pub
 
 from bridge.cot_converter import (
     UID_PREFIX,
-    CotStreamParser,
+    build_cot_event,
     cot_xml_to_meshtastic,
     meshtastic_to_cot_xml,
 )
@@ -28,6 +30,20 @@ _battery_cache: dict[str, float] = {}
 # Rate limiter for outbound mesh sends
 _last_mesh_send = 0.0
 _MESH_SEND_INTERVAL = 1.0  # seconds
+
+
+class _BridgeReceiver(pytak.QueueWorker):
+    """Reads CoT events from TAK server (rx_queue) and relays to mesh."""
+
+    def __init__(self, queue, config, bridge: "MeshBridge"):
+        super().__init__(queue, config)
+        self.bridge = bridge
+
+    async def handle_data(self, data: bytes) -> None:
+        cot_xml = data.decode("utf-8", errors="replace")
+        await asyncio.get_running_loop().run_in_executor(
+            None, self.bridge._handle_tak_event, cot_xml
+        )
 
 
 class MeshBridge:
@@ -48,9 +64,11 @@ class MeshBridge:
         self.tak_port = tak_port
         self.simulate = simulate
         self._interface = None
-        self._tak_sock: socket.socket | None = None
-        self._tak_lock = threading.Lock()
         self._running = False
+
+        # PyTAK async plumbing
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._tx_queue: asyncio.Queue | None = None
 
         # Upstream relay (optional)
         self._upstream = None
@@ -75,7 +93,7 @@ class MeshBridge:
         else:
             self._connect_meshtastic()
 
-        threading.Thread(target=self._tak_reader_loop, daemon=True).start()
+        threading.Thread(target=self._tak_thread, daemon=True).start()
 
         if self._upstream:
             self._upstream.start()
@@ -111,6 +129,64 @@ class MeshBridge:
                 user = node.get("user", {})
                 return user.get("shortName") or user.get("longName") or node_id
         return node_id
+
+    # ── PyTAK Connection ─────────────────────────────────────────────
+
+    def _tak_thread(self):
+        """Run PyTAK event loop in a dedicated thread."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._tak_async())
+        except Exception:
+            logger.exception("PyTAK thread crashed")
+        finally:
+            self._loop.close()
+            self._loop = None
+
+    async def _tak_async(self):
+        """Connect to TAK server via PyTAK with auto-reconnect."""
+        while self._running:
+            try:
+                config = ConfigParser()
+                config["meshbridge"] = {
+                    "COT_URL": f"tcp://{self.tak_host}:{self.tak_port}",
+                    "COT_HOST_ID": "MESH-BRIDGE",
+                }
+
+                clitool = pytak.CLITool(config["meshbridge"])
+                await clitool.setup()
+
+                self._tx_queue = clitool.tx_queue
+
+                receiver = _BridgeReceiver(
+                    clitool.rx_queue, config["meshbridge"], self
+                )
+                clitool.add_task(receiver)
+
+                logger.info(
+                    "Connected to TAK via PyTAK at %s:%d",
+                    self.tak_host,
+                    self.tak_port,
+                )
+
+                await clitool.run()
+
+            except OSError as e:
+                logger.warning(
+                    "Cannot connect to TAK at %s:%d: %s",
+                    self.tak_host,
+                    self.tak_port,
+                    e,
+                )
+            except Exception:
+                logger.exception("PyTAK error")
+            finally:
+                self._tx_queue = None
+
+            if self._running:
+                logger.info("Reconnecting to TAK in 5s...")
+                await asyncio.sleep(5)
 
     # ── Meshtastic → TAK ──────────────────────────────────────────────
 
@@ -153,36 +229,29 @@ class MeshBridge:
             logger.exception("Error processing mesh packet")
 
     def _send_to_tak(self, cot_xml: str):
-        with self._tak_lock:
-            try:
-                if self._tak_sock is None:
-                    self._connect_tak()
-                if self._tak_sock is None:
-                    logger.warning("No TAK connection, dropping CoT")
-                    return
-                self._tak_sock.sendall(cot_xml.encode("utf-8"))
-            except (OSError, BrokenPipeError):
-                logger.warning("TAK connection lost, reconnecting")
-                self._close_tak_sock()
-                self._connect_tak()
+        """Thread-safe: enqueue CoT for PyTAK to send to TAK server."""
+        if self._loop is None or self._tx_queue is None:
+            logger.debug("PyTAK not connected, dropping CoT")
+            return
+        data = cot_xml.encode("utf-8")
 
-    def _connect_tak(self):
+        def _enqueue():
+            try:
+                self._tx_queue.put_nowait(data)
+            except asyncio.QueueFull:
+                try:
+                    self._tx_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self._tx_queue.put_nowait(data)
+
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self.tak_host, self.tak_port))
-            sock.settimeout(None)
-            self._tak_sock = sock
-            logger.info("Connected to TAK at %s:%d", self.tak_host, self.tak_port)
-            # Send self-identification so OTS registers this as an EUD
-            self._send_self_sa()
-        except OSError as e:
-            logger.warning("Cannot connect to TAK at %s:%d: %s", self.tak_host, self.tak_port, e)
-            self._tak_sock = None
+            self._loop.call_soon_threadsafe(_enqueue)
+        except RuntimeError:
+            pass  # event loop closed
 
     def _send_self_sa(self):
-        """Send a self-SA CoT event to register the bridge as an EUD with OTS."""
-        from bridge.cot_converter import build_cot_event
+        """Send a self-SA CoT event to register the bridge as an EUD."""
         sa_xml = build_cot_event(
             cot_type="a-f-G-U-C",
             uid="MESH-BRIDGE",
@@ -191,56 +260,9 @@ class MeshBridge:
             detail_xml='<contact callsign="MeshBridge"/><__group name="Cyan" role="Team Lead"/>',
             stale_seconds=120,
         )
-        try:
-            self._tak_sock.sendall(sa_xml.encode("utf-8"))
-            logger.info("Sent bridge self-SA to OTS")
-        except OSError:
-            logger.warning("Failed to send self-SA")
-
-    def _close_tak_sock(self):
-        if self._tak_sock:
-            try:
-                self._tak_sock.close()
-            except OSError:
-                pass
-            self._tak_sock = None
+        self._send_to_tak(sa_xml)
 
     # ── TAK → Meshtastic ──────────────────────────────────────────────
-
-    def _tak_reader_loop(self):
-        """Read streaming CoT events from TAK server and relay to mesh."""
-        parser = CotStreamParser()
-        while self._running:
-            with self._tak_lock:
-                sock = self._tak_sock
-
-            if sock is None:
-                with self._tak_lock:
-                    self._connect_tak()
-                    sock = self._tak_sock
-                if sock is None:
-                    time.sleep(5)
-                    continue
-
-            try:
-                data = sock.recv(4096)
-                if not data:
-                    logger.warning("TAK connection closed")
-                    with self._tak_lock:
-                        self._close_tak_sock()
-                    time.sleep(2)
-                    continue
-
-                for event_xml in parser.feed(data.decode("utf-8", errors="replace")):
-                    self._handle_tak_event(event_xml)
-
-            except socket.timeout:
-                continue
-            except OSError:
-                logger.warning("TAK read error, reconnecting")
-                with self._tak_lock:
-                    self._close_tak_sock()
-                time.sleep(2)
 
     def _handle_tak_event(self, cot_xml: str):
         # Filter out events that originated from this bridge
