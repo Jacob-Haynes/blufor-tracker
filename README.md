@@ -1,13 +1,13 @@
 # Mesh↔TAK Bridge
 
-Connects Meshtastic mesh radios to ATAK via FreeTAKServer. A Raspberry Pi runs the bridge and TAK server — field operators use ATAK with Meshtastic radios on airplane mode, HQ connects ATAK to the Pi over WiFi.
+Connects Meshtastic mesh radios to ATAK via OpenTAKServer. A Raspberry Pi runs the bridge and TAK server — field operators use ATAK with Meshtastic radios on airplane mode, HQ connects ATAK to the Pi over WiFi.
 
 ## Architecture
 
 ```
 Field (airplane mode)                    HQ
 [ATAK] ←BT→ [Radio] ~~LoRa~~ [Radio] ←USB→ [Pi]
-                                              ├── FreeTAKServer (TAK server)
+                                              ├── OpenTAKServer (TAK server)
                                               ├── mesh_bridge.py (CoT relay)
                                               └── WiFi Hotspot (for HQ ATAK)
 
@@ -16,8 +16,8 @@ Field (airplane mode)                    HQ
 
 - Field operators run ATAK with the Meshtastic plugin — positions and messages go over LoRa
 - A Pi with a USB Meshtastic radio receives all mesh traffic
-- The bridge converts Meshtastic packets to CoT XML and feeds them into FreeTAKServer
-- HQ ATAK connects to FreeTAKServer over the Pi's WiFi hotspot
+- The bridge converts Meshtastic packets to CoT XML and feeds them into OpenTAKServer
+- HQ ATAK connects to OpenTAKServer over the Pi's WiFi hotspot
 - CoT events from HQ (chat, markers) are relayed back out over the mesh
 
 ## What Gets Bridged
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 python -m bridge --simulate
 ```
 
-Generates fake mesh traffic, converts to CoT, and logs output. Connect FreeTAKServer separately to see positions in ATAK.
+Generates fake mesh traffic, converts to CoT, and logs output. Connect OpenTAKServer separately to see positions in ATAK.
 
 ## Quick Start (Live)
 
@@ -54,8 +54,8 @@ python -m bridge --port /dev/ttyUSB0
 python -m bridge [OPTIONS]
 
   --port PORT       Meshtastic serial port (default: /dev/ttyUSB0)
-  --fts-host HOST   FreeTAKServer host (default: 127.0.0.1)
-  --fts-port PORT   FreeTAKServer TCP port (default: 8087)
+  --tak-host HOST   TAK server host (default: 127.0.0.1)
+  --tak-port PORT   TAK server TCP port (default: 8087)
   --simulate        Simulate mesh traffic (no hardware needed)
 ```
 
@@ -71,7 +71,7 @@ sudo reboot
 ```
 
 This installs:
-- FreeTAKServer (in its own venv)
+- OpenTAKServer (via official Pi installer)
 - Mesh bridge + dependencies
 - WiFi hotspot (`BFT-TAK` / `bluforce24`)
 - Systemd services for everything
@@ -83,15 +83,15 @@ This installs:
 | wlan0 (hotspot) | 192.168.4.1 | ATAK devices connect here |
 | eth0 (direct cable) | 192.168.1.1 | SSH admin (laptop at 192.168.1.2) |
 
-Both work simultaneously. If the Pi is on an existing network instead, FTS binds `0.0.0.0` — ATAK connects on whatever IP the Pi has.
+Both work simultaneously. If the Pi is on an existing network instead, OTS binds `0.0.0.0` — ATAK connects on whatever IP the Pi has.
 
 ### Commands
 
 ```bash
-sudo systemctl start fts mesh-bridge    # start services
-sudo systemctl stop mesh-bridge         # stop bridge
-journalctl -u mesh-bridge -f            # bridge logs
-journalctl -u fts -f                    # FTS logs
+sudo systemctl start opentakserver mesh-bridge   # start services
+sudo systemctl stop mesh-bridge                  # stop bridge
+journalctl -u mesh-bridge -f                     # bridge logs
+journalctl -u opentakserver -f                   # OTS logs
 ```
 
 ### Updating
@@ -123,20 +123,28 @@ sudo systemctl restart mesh-bridge
    - Protocol: TCP
 4. Field positions appear on the HQ ATAK map
 
+## Related Projects
+
+These repos run alongside blufor-tracker on the same Pi, managed by [pi-profiles](https://github.com/Jacob-Haynes/pi-profiles):
+
+| Repo | Description |
+|---|---|
+| [drone-detector](https://github.com/Jacob-Haynes/drone-detector) | WiFi-based drone detection (DJI DroneID, Remote ID) with CoT output to TAK |
+| [mesh-deadrop](https://github.com/Jacob-Haynes/mesh-deadrop) | Meshtastic store-and-forward message relay — encrypted dead drop for mesh nodes |
+| [tac-advisor](https://github.com/Jacob-Haynes/tac-advisor) | Local LLM tactical advisor — reads CoT context, answers queries via web UI and Meshtastic |
+| [pi-profiles](https://github.com/Jacob-Haynes/pi-profiles) | Systemd profile switcher — run multiple projects on one Pi, switch with a single command |
+
 ## Project Structure
 
 ```
 bridge/
   __main__.py       # entry point
-  mesh_bridge.py    # Meshtastic serial ↔ FTS TCP, simulator
+  mesh_bridge.py    # Meshtastic serial ↔ OTS TCP, simulator
   cot_converter.py  # CoT XML ↔ Meshtastic packet conversion
 deploy/
-  install.sh        # Pi installer (FTS + bridge + hotspot)
+  install.sh        # Pi installer (OTS + bridge + hotspot)
   start.sh          # launcher with auto-detection
   mesh-bridge.service
-  fts.service
-  hostapd.conf      # WiFi hotspot config
-  dnsmasq.conf      # DHCP config
 archive/
   server/           # original BFT web server (archived)
   frontend/         # original BFT web UI (archived)
