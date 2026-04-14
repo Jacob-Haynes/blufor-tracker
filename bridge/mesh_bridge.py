@@ -13,7 +13,6 @@ from pubsub import pub
 
 from bridge.cot_converter import (
     UID_PREFIX,
-    build_cot_event,
     cot_xml_to_meshtastic,
     meshtastic_to_cot_xml,
 )
@@ -70,9 +69,6 @@ class MeshBridge:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tx_queue: asyncio.Queue | None = None
 
-        # RabbitMQ direct publish for GeoChat (OTS doesn't relay chat via TCP)
-        self._known_euds: set[str] = set()
-
         # Upstream relay (optional)
         self._upstream = None
         if upstream_host:
@@ -102,15 +98,10 @@ class MeshBridge:
             self._upstream.start()
 
         logger.info("Bridge started — press Ctrl+C to stop")
-        sa_counter = 0
         try:
             while self._running:
-                time.sleep(1)
+                time.sleep(5)
                 self._cleanup_dedup()
-                sa_counter += 1
-                if sa_counter >= 5:
-                    sa_counter = 0
-                    self._send_self_sa()
         except KeyboardInterrupt:
             logger.info("Shutting down")
             self._running = False
@@ -209,25 +200,27 @@ class MeshBridge:
                 battery = telemetry.get("deviceMetrics", {}).get("batteryLevel")
                 if battery is not None:
                     _battery_cache[callsign] = float(battery)
-                    logger.debug("Battery %s: %.0f%%", callsign, battery)
                 return
 
-            # Convert to CoT XML (handles all portnums including ATAK_PLUGIN)
+            # OTS handles PLI and GeoChat natively via MQTT — skip
+            if portnum in ("POSITION_APP", "ATAK_PLUGIN"):
+                return
+            if portnum == "TEXT_MESSAGE_APP":
+                text = decoded.get("text", "").strip().upper()
+                if not text.startswith("SOS") and not text.startswith("PANIC"):
+                    return  # Regular chat handled by OTS via MQTT
+
+            # Convert to CoT XML (only WAYPOINT_APP and SOS/PANIC reach here)
             cot_xml = meshtastic_to_cot_xml(packet, _battery_cache)
             if cot_xml is None:
                 return
 
-            # Dedup check
             uid = self._extract_uid(cot_xml)
             if uid and self._is_duplicate(uid):
                 return
 
             logger.info("Mesh→TAK: %s from %s [%s]", portnum, callsign, uid or "?")
             self._send_to_tak(cot_xml)
-
-            # OTS doesn't relay GeoChat via TCP streaming — publish directly
-            if uid and uid.startswith("GeoChat"):
-                self._publish_chat_to_euds(cot_xml)
 
             if self._upstream:
                 self._upstream.send(cot_xml)
@@ -257,53 +250,18 @@ class MeshBridge:
         except RuntimeError:
             pass  # event loop closed
 
-    def _send_self_sa(self):
-        """Send a self-SA CoT event to register the bridge as an EUD."""
-        sa_xml = build_cot_event(
-            cot_type="a-f-G-U-C",
-            uid="MESH-BRIDGE",
-            lat=0.0,
-            lon=0.0,
-            detail_xml='<contact callsign="MeshBridge"/><__group name="Cyan" role="Team Lead"/>',
-            stale_seconds=120,
-        )
-        self._send_to_tak(sa_xml)
-
-    def _publish_chat_to_euds(self, cot_xml: str):
-        """Publish GeoChat directly to EUD RabbitMQ queues, bypassing OTS."""
-        if not self._known_euds:
-            logger.debug("No known EUDs for chat relay")
-            return
-        try:
-            import pika
-
-            conn = pika.BlockingConnection(
-                pika.ConnectionParameters("localhost")
-            )
-            ch = conn.channel()
-            data = cot_xml.encode("utf-8")
-            for eud_uid in list(self._known_euds):
-                ch.basic_publish(
-                    exchange="", routing_key=eud_uid, body=data
-                )
-                logger.info("Chat→RMQ: published to %s", eud_uid)
-            conn.close()
-        except Exception:
-            logger.warning("Failed to publish chat via RabbitMQ")
-
     # ── TAK → Meshtastic ──────────────────────────────────────────────
 
     def _handle_tak_event(self, cot_xml: str):
-        # Filter out events that originated from this bridge
         uid = self._extract_uid(cot_xml)
         if uid and uid.startswith(UID_PREFIX):
             return
 
-        # Track connected EUDs for direct RabbitMQ chat publish
-        if uid and not uid.startswith("GeoChat"):
-            self._known_euds.add(uid)
+        # OTS handles PLI and GeoChat via MQTT — only relay emergency/markers
+        cot_type = self._extract_type(cot_xml)
+        if cot_type in ("a-f-G-U-C", "b-t-f"):
+            return
 
-        # Convert to Meshtastic packet
         mesh_pkt = cot_xml_to_meshtastic(cot_xml)
         if mesh_pkt is None:
             return
@@ -381,6 +339,17 @@ class MeshBridge:
         if start < 0:
             return None
         start += 5
+        end = cot_xml.find('"', start)
+        if end < 0:
+            return None
+        return cot_xml[start:end]
+
+    @staticmethod
+    def _extract_type(cot_xml: str) -> str | None:
+        start = cot_xml.find('type="')
+        if start < 0:
+            return None
+        start += 6
         end = cot_xml.find('"', start)
         if end < 0:
             return None
