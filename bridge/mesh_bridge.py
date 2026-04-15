@@ -193,6 +193,7 @@ class MeshBridge:
 
             # Enrich packet with resolved callsign for converter
             packet["_callsign"] = callsign
+            logger.debug("Mesh RX: portnum=%s from=%s", portnum, callsign)
 
             # Cache battery from telemetry
             if portnum == "TELEMETRY_APP":
@@ -202,15 +203,7 @@ class MeshBridge:
                     _battery_cache[callsign] = float(battery)
                 return
 
-            # OTS handles PLI and GeoChat natively via MQTT — skip
-            if portnum in ("POSITION_APP", "ATAK_PLUGIN"):
-                return
-            if portnum == "TEXT_MESSAGE_APP":
-                text = decoded.get("text", "").strip().upper()
-                if not text.startswith("SOS") and not text.startswith("PANIC"):
-                    return  # Regular chat handled by OTS via MQTT
-
-            # Convert to CoT XML (only WAYPOINT_APP and SOS/PANIC reach here)
+            # Convert to CoT XML
             cot_xml = meshtastic_to_cot_xml(packet, _battery_cache)
             if cot_xml is None:
                 return
@@ -253,21 +246,19 @@ class MeshBridge:
     # ── TAK → Meshtastic ──────────────────────────────────────────────
 
     def _handle_tak_event(self, cot_xml: str):
-        uid = self._extract_uid(cot_xml)
-        if uid and uid.startswith(UID_PREFIX):
-            return
+        try:
+            uid = self._extract_uid(cot_xml)
+            if uid and uid.startswith(UID_PREFIX):
+                return
 
-        # OTS handles PLI and GeoChat via MQTT — only relay emergency/markers
-        cot_type = self._extract_type(cot_xml)
-        if cot_type in ("a-f-G-U-C", "b-t-f"):
-            return
+            mesh_pkt = cot_xml_to_meshtastic(cot_xml)
+            if mesh_pkt is None:
+                return
 
-        mesh_pkt = cot_xml_to_meshtastic(cot_xml)
-        if mesh_pkt is None:
-            return
-
-        logger.info("TAK→Mesh: %s [%s]", mesh_pkt.get("portnum", "?"), uid or "?")
-        self._send_to_mesh(mesh_pkt)
+            logger.info("TAK→Mesh: %s [%s]", mesh_pkt.get("portnum", "?"), uid or "?")
+            self._send_to_mesh(mesh_pkt)
+        except Exception:
+            logger.exception("Error relaying TAK event to mesh")
 
     # ── Upstream → Local TAK ─────────────────────────────────────────
 
