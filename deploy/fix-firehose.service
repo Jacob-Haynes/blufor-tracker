@@ -1,7 +1,0 @@
-[Unit]
-Description=Bind EUD queues to RabbitMQ firehose exchange
-After=rabbitmq-server.service
-
-[Service]
-Type=oneshot
-ExecStart=/opt/blufor-tracker/.venv/bin/python /opt/blufor-tracker/deploy/fix_firehose.py
