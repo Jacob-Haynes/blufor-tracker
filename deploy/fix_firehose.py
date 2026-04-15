@@ -6,26 +6,22 @@ script re-creates the bindings and can be run on a timer or after OTS
 restarts.
 """
 
+import os
+import subprocess
+
 import pika
+
+SKIP_PREFIXES = ("mqtt-", "python-", "amq.")
+SKIP_NAMES = {"cot_parser", "meshtastic", "", "name", "Listing queues"}
 
 
 def bind_firehose():
-    conn = pika.BlockingConnection(
-        pika.ConnectionParameters(
-            "127.0.0.1", credentials=pika.PlainCredentials("guest", "guest")
-        )
-    )
-    ch = conn.channel()
-    conn.close()
+    # Discover queues via rabbitmqctl (sudo only if not root)
+    cmd = ["rabbitmqctl", "list_queues", "name", "--quiet"]
+    if os.getuid() != 0:
+        cmd.insert(0, "sudo")
 
-    # Discover queues via rabbitmqctl
-    import subprocess
-
-    result = subprocess.run(
-        ["sudo", "rabbitmqctl", "list_queues", "name", "--quiet"],
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
     conn = pika.BlockingConnection(
         pika.ConnectionParameters(
@@ -34,10 +30,9 @@ def bind_firehose():
     )
     ch = conn.channel()
 
-    skip = {"cot_parser", "meshtastic", "", "name", "Listing queues"}
     for line in result.stdout.strip().splitlines():
         queue = line.strip()
-        if not queue or queue in skip or queue.startswith("mqtt-") or queue.startswith("python-"):
+        if not queue or queue in SKIP_NAMES or any(queue.startswith(p) for p in SKIP_PREFIXES):
             continue
         try:
             ch.queue_bind(queue=queue, exchange="firehose")
