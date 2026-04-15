@@ -121,18 +121,167 @@ def meshtastic_to_cot_xml(
     return None
 
 
+def _decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    result = 0
+    shift = 0
+    while pos < len(data):
+        b = data[pos]
+        result |= (b & 0x7F) << shift
+        pos += 1
+        if not (b & 0x80):
+            break
+        shift += 7
+    return result, pos
+
+
+def _parse_raw_fields(data: bytes) -> dict[int, list]:
+    """Parse protobuf wire format into {field_num: [(wire_type, value), ...]}."""
+    import struct as _struct
+
+    fields: dict[int, list] = {}
+    pos = 0
+    while pos < len(data):
+        tag, pos = _decode_varint(data, pos)
+        field_num = tag >> 3
+        wire_type = tag & 0x7
+        if wire_type == 0:  # varint
+            value, pos = _decode_varint(data, pos)
+        elif wire_type == 2:  # length-delimited
+            length, pos = _decode_varint(data, pos)
+            value = data[pos : pos + length]
+            pos += length
+        elif wire_type == 5:  # 32-bit (sfixed32)
+            value = _struct.unpack_from("<i", data, pos)[0]
+            pos += 4
+        elif wire_type == 1:  # 64-bit
+            value = _struct.unpack_from("<q", data, pos)[0]
+            pos += 8
+        else:
+            break
+        fields.setdefault(field_num, []).append(value)
+    return fields
+
+
+def _decompress_str(raw: bytes) -> str:
+    """Decompress a unishox2-compressed string field."""
+    try:
+        import unishox2
+
+        # Output buffer must be larger than input; compressed strings expand ~2-4x
+        return unishox2.decompress(raw, len(raw) * 4 + 64)
+    except Exception:
+        return raw.decode("utf-8", errors="replace")
+
+
+def _parse_compressed_takpacket(raw: bytes, callsign: str) -> str | None:
+    """Parse a compressed TAKPacket by decoding wire format manually."""
+    top = _parse_raw_fields(raw)
+
+    # Field 2: Contact
+    cs = callsign
+    device_cs = ""
+    if 2 in top:
+        contact_fields = _parse_raw_fields(top[2][0])
+        if 1 in contact_fields:
+            cs = _decompress_str(contact_fields[1][0])
+        if 2 in contact_fields:
+            device_cs = _decompress_str(contact_fields[2][0])
+
+    detail_parts = [f'<contact callsign="{_xml_escape(cs)}"/>']
+
+    # Field 3: Group
+    if 3 in top:
+        group_fields = _parse_raw_fields(top[3][0])
+        team_val = group_fields.get(1, [(None,)])[0]
+        role_val = group_fields.get(2, [(None,)])[0]
+        team = ""
+        role = ""
+        if team_val is not None:
+            try:
+                team = atak_pb2.Team.Name(team_val)
+            except ValueError:
+                pass
+        if role_val is not None:
+            try:
+                role = atak_pb2.MemberRole.Name(role_val)
+            except ValueError:
+                pass
+        if team or role:
+            detail_parts.append(f'<__group name="{team}" role="{role}"/>')
+
+    # Field 4: Status
+    if 4 in top:
+        status_fields = _parse_raw_fields(top[4][0])
+        battery = status_fields.get(1, [None])[0]
+        if battery is not None:
+            detail_parts.append(f'<status battery="{battery}"/>')
+
+    # Field 5: PLI
+    if 5 in top:
+        pli_fields = _parse_raw_fields(top[5][0])
+        lat = pli_fields.get(1, [0])[0] / 1e7
+        lon = pli_fields.get(2, [0])[0] / 1e7
+        alt = pli_fields.get(3, [0])[0]
+        speed = pli_fields.get(4, [0])[0]
+        course = pli_fields.get(5, [0])[0]
+
+        uid = f"{UID_PREFIX}{cs}"
+        if speed or course:
+            detail_parts.append(f'<track speed="{speed}" course="{course}"/>')
+
+        detail_xml = "".join(detail_parts)
+        return build_cot_event("a-f-G-U-C", uid, lat, lon, alt, detail_xml, PLI_STALE)
+
+    # Field 6: GeoChat
+    if 6 in top:
+        chat_fields = _parse_raw_fields(top[6][0])
+        message = _decompress_str(chat_fields[1][0]) if 1 in chat_fields else ""
+        to = _decompress_str(chat_fields[2][0]) if 2 in chat_fields else ""
+        to_callsign = _decompress_str(chat_fields[3][0]) if 3 in chat_fields else ""
+
+        sender_uid = "MESH-BRIDGE"
+        display_msg = f"[{cs}] {message}"
+        chatroom = to_callsign or to or "All Chat Rooms"
+        if not chatroom or chatroom == "^all":
+            chatroom = "All Chat Rooms"
+        msg_id = uuid.uuid4().hex[:8]
+        uid = f"GeoChat.{sender_uid}.{chatroom}.{msg_id}"
+        now_iso = _isotime()
+
+        detail_parts.append(
+            f'<__chat chatroom="{_xml_escape(chatroom)}"'
+            f' senderCallsign="{_xml_escape(cs)}" groupOwner="false">'
+            f'<chatgrp uid0="{sender_uid}" uid1="{chatroom}" id="{chatroom}"/>'
+            f"</__chat>"
+        )
+        detail_parts.append(
+            f'<link uid="{sender_uid}" type="a-f-G-U-C" relation="p-p"/>'
+        )
+        detail_parts.append(
+            f'<remarks source="{sender_uid}" to="{chatroom}"'
+            f' time="{now_iso}">{_xml_escape(display_msg)}</remarks>'
+        )
+
+        detail_xml = "".join(detail_parts)
+        return build_cot_event("b-t-f", uid, 0.0, 0.0, 0.0, detail_xml, CHAT_STALE)
+
+    logger.debug("Compressed TAKPacket from %s had no PLI or chat", callsign)
+    return None
+
+
 def _takpacket_to_cot(decoded: dict, callsign: str) -> str | None:
     """Convert a TAKPacket protobuf (portnum 72) to CoT XML."""
     raw = decoded.get("payload", b"")
     if not raw:
         return None
 
+    # Try standard protobuf parse first (works for uncompressed packets)
     try:
         tak = atak_pb2.TAKPacket()
         tak.ParseFromString(raw)
     except Exception:
-        logger.warning("Failed to parse TAKPacket from %s", callsign)
-        return None
+        # Compressed packets have non-UTF-8 string fields — parse wire format manually
+        return _parse_compressed_takpacket(raw, callsign)
 
     uid = f"{UID_PREFIX}{callsign}"
 
@@ -307,6 +456,95 @@ def _waypoint_to_cot(decoded: dict, callsign: str) -> str | None:
     return build_cot_event("b-m-p-c", uid, lat, lon, 0.0, detail_xml, MARKER_STALE)
 
 
+def _encode_varint(value: int) -> bytes:
+    parts = []
+    while value > 0x7F:
+        parts.append((value & 0x7F) | 0x80)
+        value >>= 7
+    parts.append(value & 0x7F)
+    return bytes(parts)
+
+
+def _encode_field(field_num: int, wire_type: int, data: bytes) -> bytes:
+    tag = _encode_varint((field_num << 3) | wire_type)
+    if wire_type == 2:  # length-delimited
+        return tag + _encode_varint(len(data)) + data
+    return tag + data
+
+
+def _compress_takpacket(tak: atak_pb2.TAKPacket) -> bytes:
+    """Serialize TAKPacket with unishox2-compressed string fields."""
+    try:
+        import unishox2
+    except ImportError:
+        return tak.SerializeToString()
+
+    parts = []
+
+    # Field 1: is_compressed = true
+    parts.append(_encode_field(1, 0, b"\x01"))
+
+    # Field 2: Contact (submessage)
+    if tak.HasField("contact"):
+        contact_parts = []
+        if tak.contact.callsign:
+            compressed, _ = unishox2.compress(tak.contact.callsign)
+            contact_parts.append(_encode_field(1, 2, compressed))
+        if tak.contact.device_callsign:
+            compressed, _ = unishox2.compress(tak.contact.device_callsign)
+            contact_parts.append(_encode_field(2, 2, compressed))
+        if contact_parts:
+            contact_data = b"".join(contact_parts)
+            parts.append(_encode_field(2, 2, contact_data))
+
+    # Field 3: Group (submessage — integer fields, no compression needed)
+    if tak.HasField("group"):
+        group_parts = []
+        if tak.group.team:
+            group_parts.append(_encode_field(1, 0, _encode_varint(tak.group.team)))
+        if tak.group.role:
+            group_parts.append(_encode_field(2, 0, _encode_varint(tak.group.role)))
+        if group_parts:
+            parts.append(_encode_field(3, 2, b"".join(group_parts)))
+
+    # Field 4: Status (submessage)
+    if tak.HasField("status") and tak.status.battery:
+        status_data = _encode_field(1, 0, _encode_varint(tak.status.battery))
+        parts.append(_encode_field(4, 2, status_data))
+
+    # Field 5: PLI (submessage — sfixed32 + varint fields)
+    if tak.HasField("pli"):
+        import struct as _struct
+
+        pli_parts = []
+        pli_parts.append(_encode_field(1, 5, _struct.pack("<i", tak.pli.latitude_i)))
+        pli_parts.append(_encode_field(2, 5, _struct.pack("<i", tak.pli.longitude_i)))
+        if tak.pli.altitude:
+            pli_parts.append(_encode_field(3, 0, _encode_varint(tak.pli.altitude)))
+        if tak.pli.speed:
+            pli_parts.append(_encode_field(4, 0, _encode_varint(tak.pli.speed)))
+        if tak.pli.course:
+            pli_parts.append(_encode_field(5, 0, _encode_varint(tak.pli.course)))
+        parts.append(_encode_field(5, 2, b"".join(pli_parts)))
+
+    # Field 6: GeoChat (submessage)
+    if tak.HasField("chat"):
+        chat_parts = []
+        if tak.chat.message:
+            compressed, _ = unishox2.compress(tak.chat.message)
+            chat_parts.append(_encode_field(1, 2, compressed))
+        if tak.chat.to:
+            compressed, _ = unishox2.compress(tak.chat.to)
+            chat_parts.append(_encode_field(2, 2, compressed))
+        if tak.chat.to_callsign:
+            compressed, _ = unishox2.compress(tak.chat.to_callsign)
+            chat_parts.append(_encode_field(3, 2, compressed))
+        if chat_parts:
+            parts.append(_encode_field(6, 2, b"".join(chat_parts)))
+
+    return b"".join(parts)
+
+
 def _pli_to_takpacket(parsed: dict) -> dict | None:
     """Convert a parsed CoT PLI event to a TAKPacket protobuf for mesh relay."""
     lat = parsed.get("lat", 0)
@@ -323,9 +561,10 @@ def _pli_to_takpacket(parsed: dict) -> dict | None:
     tak.pli.speed = int(parsed.get("speed", 0))
     tak.pli.course = int(parsed.get("course", 0))
 
-    # Contact
+    # Contact — device_callsign must be the original ATAK UID
     callsign = parsed.get("callsign", parsed.get("uid", "Unknown"))
     tak.contact.callsign = callsign
+    tak.contact.device_callsign = parsed.get("uid", f"MESH-{callsign}")
 
     # Team/role
     team = parsed.get("team", "")
@@ -354,6 +593,7 @@ def _chat_to_takpacket(parsed: dict) -> dict | None:
 
     sender = parsed.get("sender_callsign", parsed.get("callsign", "Unknown"))
     tak.contact.callsign = sender
+    tak.contact.device_callsign = parsed.get("uid", f"MESH-{sender}")
 
     tak.chat.message = text
 

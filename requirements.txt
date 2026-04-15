@@ -1,3 +1,5 @@
+cryptography
 meshtastic
+paho-mqtt
 pytak
 takproto

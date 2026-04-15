@@ -7,10 +7,11 @@ Wants=opentakserver.service
 Type=simple
 User=jhh-pi
 WorkingDirectory=/opt/blufor-tracker
-ExecStart=/opt/blufor-tracker/deploy/start.sh
+ExecStart=/opt/blufor-tracker/.venv/bin/python -m bridge.mqtt_shim --port /dev/ttyUSB0
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 EnvironmentFile=-/opt/blufor-tracker/deploy/upstream.env
 
 [Install]
