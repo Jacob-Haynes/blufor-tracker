@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic firehose queue binding (OTS Python 3.13 workaround)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+
+[Install]
+WantedBy=timers.target
