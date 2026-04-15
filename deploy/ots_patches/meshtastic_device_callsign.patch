@@ -1,0 +1,14 @@
+--- OTS meshtastic_controller.py patch ---
+-- Strips |UUID suffix from ATAK device_callsign in node_info()
+-- Without this, atak_plugin() passes the full ANDROID-xxx|UUID to self.cot()
+-- which looks it up in meshtastic_devices and crashes with KeyError,
+-- tearing down the entire RabbitMQ connection and blocking all CoT routing.
+--
+-- Apply after OTS install/upgrade:
+--   OTS_CTL=~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver/controllers/meshtastic_controller.py
+--   sed -i '/uid = unishox2.decompress(pb.contact.device_callsign/a\            uid = uid.split("|")[0]  # BFT patch: strip ATAK pipe-UUID suffix (causes KeyError in atak_plugin)' "$OTS_CTL"
+--   sudo systemctl restart opentakserver
+--
+-- Reported upstream: OTS extracts device_callsign from compressed TAKPacket
+-- but ATAK appends |UUID per-message. OTS uses this as a cache key without
+-- stripping the suffix.

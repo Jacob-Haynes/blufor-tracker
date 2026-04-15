@@ -3,6 +3,10 @@
 The Heltec V3's WiFi cannot establish TCP connections to the Pi 5's hotspot,
 so this shim reads packets from B10 via USB serial and publishes them to
 RabbitMQ MQTT on localhost in the ServiceEnvelope format OTS expects.
+
+Downlink chat (WiFi ATAK → mesh) is handled by subscribing to the RabbitMQ
+firehose for original CoT XML with sender metadata, then converting GeoChat
+to ATAK_PLUGIN TAKPackets for the mesh.
 """
 
 import argparse
@@ -12,6 +16,7 @@ import threading
 import time
 
 import paho.mqtt.client as mqtt
+import pika
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from meshtastic.protobuf import atak_pb2, mesh_pb2, mqtt_pb2, portnums_pb2
 from meshtastic.serial_interface import SerialInterface
@@ -43,7 +48,8 @@ class MqttShim:
         self._channel_id = ""
         self._channel_key: bytes | None = None
         self._running = False
-        self._mesh_atak_uids: set[str] = set()  # ATAK UIDs seen from mesh (echo prevention)
+        self._atak_nodes: set[int] = set()  # nodes that send ATAK_PLUGIN (dedup TEXT_MESSAGE_APP)
+        self._uplinked_texts: dict[str, float] = {}  # text → timestamp (firehose echo prevention)
 
     def start(self):
         self._running = True
@@ -76,13 +82,19 @@ class MqttShim:
         # Subscribe to mesh receive events
         pub.subscribe(self._on_mesh_receive, "meshtastic.receive")
 
-        # Connect to MQTT
+        # Connect to MQTT (uplink: serial → OTS)
         self._mqtt = mqtt.Client(client_id="mesh-shim", protocol=mqtt.MQTTv311)
         self._mqtt.username_pw_set(self.mqtt_user, self.mqtt_pass)
         self._mqtt.on_connect = self._on_mqtt_connect
         self._mqtt.on_message = self._on_mqtt_message
         self._mqtt.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
         self._mqtt.loop_start()
+
+        # Start firehose consumer (downlink: OTS → serial for ATAK chat)
+        self._start_firehose_consumer()
+
+        # Start periodic self-SA so ATAK clients recognise B10 as a mesh contact
+        self._start_self_sa()
 
         logger.info("Shim started — serial ↔ MQTT bridge active")
         try:
@@ -147,16 +159,32 @@ class MqttShim:
 
     # ── Serial → MQTT (uplink) ──────────────────────────────────────
 
-    # Portnums that crash OTS's RabbitMQ connection (KeyError on ATAK UID
-    # with pipe suffix).  Filter until the OTS bug is fixed upstream.
     _SKIP_PORTNUMS = {"ATAK_FORWARDER"}
 
     def _on_mesh_receive(self, packet, interface=None):
         """Called when a packet is received from the mesh via serial."""
         try:
             portnum = packet.get("decoded", {}).get("portnum", "")
+            from_id = packet.get("from", 0)
+
             if portnum in self._SKIP_PORTNUMS:
                 logger.debug("Skipping %s (OTS bug workaround)", portnum)
+                return
+
+            # Track all uplinked TEXT_MESSAGE_APP for firehose echo prevention
+            if portnum == "TEXT_MESSAGE_APP":
+                text = packet.get("decoded", {}).get("text", "")
+                if text:
+                    self._uplinked_texts[text.strip()] = time.time()
+
+            # Dedup: ATAK sends both ATAK_PLUGIN and TEXT_MESSAGE_APP for chats.
+            # Any node that sends ATAK_PLUGIN is an ATAK device — suppress its
+            # TEXT_MESSAGE_APP since ATAK_PLUGIN carries the proper CoT payload.
+            if portnum == "ATAK_PLUGIN":
+                self._atak_nodes.add(from_id)
+            elif portnum == "TEXT_MESSAGE_APP" and from_id in self._atak_nodes:
+                logger.info("Dedup: suppressing TEXT_MESSAGE_APP from %s (known ATAK node)",
+                            packet.get("fromId", "?"))
                 return
 
             # Build a MeshPacket protobuf from the raw packet
@@ -272,66 +300,52 @@ class MqttShim:
 
     @staticmethod
     def _fix_compressed_atak(payload: bytes) -> bytes:
-        """Fix device_callsign in a compressed TAKPacket via wire-format parsing."""
-        from bridge.cot_converter import (
-            _decompress_str,
-            _encode_field,
-            _encode_varint,
-            _parse_raw_fields,
+        """Pass through compressed TAKPackets — rely on OTS-side patch for device_callsign fix.
+
+        Fixing compressed packets required unishox2 decompress/recompress which caused
+        malloc heap corruption crashes (the C .so isn't thread-safe). The OTS patch
+        (deploy/ots_patches/meshtastic_device_callsign.patch) handles this server-side.
+        """
+        return payload
+
+    # ── Self-SA: register B10 as ATAK device on the mesh ──────────
+
+    _SELF_SA_INTERVAL = 30  # seconds
+
+    def _start_self_sa(self):
+        """Periodically send a PLI TAKPacket so ATAK clients recognise B10."""
+        def _sa_loop():
+            while self._running:
+                try:
+                    self._send_self_sa()
+                except Exception:
+                    logger.exception("Self-SA send failed")
+                time.sleep(self._SELF_SA_INTERVAL)
+
+        thread = threading.Thread(target=_sa_loop, daemon=True, name="self-sa")
+        thread.start()
+
+    def _send_self_sa(self):
+        tak = atak_pb2.TAKPacket()
+        tak.contact.callsign = "BRIDGE"
+        tak.contact.device_callsign = f"ANDROID-{self._gateway_id}"
+        tak.pli.latitude_i = 0
+        tak.pli.longitude_i = 0
+        tak.pli.altitude = 0
+        tak.pli.speed = 0
+        tak.pli.course = 0
+        tak.group.team = atak_pb2.Team.Value("Cyan")
+        tak.group.role = atak_pb2.MemberRole.Value("HQ")
+
+        raw = tak.SerializeToString()
+        self._interface.sendData(
+            raw,
+            portNum=portnums_pb2.PortNum.Value("ATAK_PLUGIN"),
+            wantAck=False,
         )
+        logger.debug("Self-SA sent (%d bytes)", len(raw))
 
-        try:
-            top = _parse_raw_fields(payload)
-            if 2 not in top:
-                return payload
-
-            contact_fields = _parse_raw_fields(top[2][0])
-            if 2 not in contact_fields:
-                return payload
-
-            device_cs = _decompress_str(contact_fields[2][0])
-            if "|" not in device_cs:
-                return payload
-
-            fixed = device_cs.split("|")[0]
-            logger.info("Fixed compressed device_callsign: %s → %s", device_cs, fixed)
-
-            # Re-encode device_callsign
-            try:
-                import unishox2
-
-                new_dc, _ = unishox2.compress(fixed)
-            except ImportError:
-                new_dc = fixed.encode("utf-8")
-
-            # Rebuild Contact submessage
-            contact_parts = []
-            if 1 in contact_fields:
-                contact_parts.append(_encode_field(1, 2, contact_fields[1][0]))
-            contact_parts.append(_encode_field(2, 2, new_dc))
-            new_contact = b"".join(contact_parts)
-
-            # Rebuild TAKPacket preserving all other fields
-            result = []
-            contact_done = False
-            for fn in sorted(top.keys()):
-                for val in top[fn]:
-                    if fn == 1:  # is_compressed: varint
-                        result.append(_encode_field(fn, 0, _encode_varint(val)))
-                    elif fn == 2:  # Contact: replaced
-                        if not contact_done:
-                            result.append(_encode_field(fn, 2, new_contact))
-                            contact_done = True
-                    else:  # All other fields: length-delimited submessages
-                        result.append(_encode_field(fn, 2, val))
-
-            return b"".join(result)
-
-        except Exception:
-            logger.debug("Could not fix compressed ATAK payload", exc_info=True)
-            return payload
-
-    # ── MQTT → Serial (downlink) ────────────────────────────────────
+    # ── MQTT → Serial (downlink: position/non-chat) ────────────────
 
     def _on_mqtt_message(self, client, userdata, msg):
         """Called when OTS publishes a message for the mesh."""
@@ -362,6 +376,100 @@ class MqttShim:
 
         except Exception:
             logger.exception("Error in MQTT→Serial relay")
+
+    # ── Firehose → Serial (downlink: ATAK chat with sender metadata) ─
+
+    def _start_firehose_consumer(self):
+        """Subscribe to RabbitMQ firehose for original CoT XML."""
+        thread = threading.Thread(target=self._firehose_loop, daemon=True, name="firehose")
+        thread.start()
+
+    def _firehose_loop(self):
+        while self._running:
+            try:
+                conn = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        self.mqtt_host,
+                        credentials=pika.PlainCredentials(self.mqtt_user, self.mqtt_pass),
+                    )
+                )
+                ch = conn.channel()
+                result = ch.queue_declare(queue="", exclusive=True)
+                queue_name = result.method.queue
+                ch.queue_bind(queue=queue_name, exchange="firehose")
+                logger.info("Firehose consumer started on queue %s", queue_name)
+
+                for method, properties, body in ch.consume(queue_name, auto_ack=True):
+                    if not self._running:
+                        break
+                    self._on_firehose_cot(body)
+
+                conn.close()
+            except Exception:
+                if self._running:
+                    logger.exception("Firehose consumer error, reconnecting in 5s")
+                    time.sleep(5)
+
+    def _on_firehose_cot(self, body: bytes):
+        """Process a CoT event from the firehose — relay GeoChat to mesh as ATAK_PLUGIN."""
+        import json
+        try:
+            raw = body.decode("utf-8", errors="replace")
+
+            # Firehose delivers JSON: {"uid": "...", "cot": "<event...>"}
+            try:
+                msg = json.loads(raw)
+                xml_str = msg.get("cot", "")
+                sender_uid = msg.get("uid", "")
+            except (json.JSONDecodeError, AttributeError):
+                xml_str = raw
+                sender_uid = ""
+
+            # Only process GeoChat events
+            if 'type="b-t-f"' not in xml_str:
+                return
+
+            from bridge.cot_converter import parse_cot_event
+            parsed = parse_cot_event(xml_str)
+            if not parsed:
+                logger.warning("Firehose: could not parse GeoChat CoT")
+                return
+
+            remarks = parsed.get("remarks", "")
+            if not remarks:
+                return
+
+            # Echo prevention: skip messages we recently uplinked from mesh
+            now = time.time()
+            text_key = remarks.strip()
+            if text_key in self._uplinked_texts and now - self._uplinked_texts[text_key] < 30:
+                logger.info("Firehose: skipping echo of '%s'", text_key[:50])
+                return
+
+            # Clean old entries
+            self._uplinked_texts = {k: v for k, v in self._uplinked_texts.items() if now - v < 60}
+
+            sender = parsed.get("sender_callsign", parsed.get("callsign", "TAK"))
+
+            # Build TAKPacket GeoChat for ATAK on mesh (uncompressed only —
+            # compressed requires unishox2 which crashes from thread contention)
+            tak = atak_pb2.TAKPacket()
+            tak.contact.callsign = sender
+            tak.contact.device_callsign = sender_uid or f"TAK-{sender}"
+            tak.chat.message = remarks
+            tak.chat.to = "All Chat Rooms"
+
+            raw = tak.SerializeToString()
+            self._interface.sendData(
+                raw,
+                portNum=portnums_pb2.PortNum.Value("ATAK_PLUGIN"),
+                wantAck=False,
+            )
+            logger.info("Firehose→Serial: GeoChat from %s (%d bytes): %s",
+                        sender, len(raw), remarks[:80])
+
+        except Exception:
+            logger.exception("Error processing firehose CoT")
 
 
 def main():
