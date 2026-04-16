@@ -262,6 +262,110 @@ scp bridge/mqtt_shim.py USER@PI_IP:/opt/blufor-tracker/bridge/mqtt_shim.py
 ssh USER@PI_IP 'sudo systemctl restart mesh-bridge'
 ```
 
+## Remote Access (Internet)
+
+If the Pi has internet (Ethernet, Starlink, mobile hotspot), remote ATAK clients can connect over the web through a WireGuard relay. No extra apps needed on phones — ATAK connects directly over SSL.
+
+```
+Remote ATAK --SSL:8089--> [GCP relay] --WireGuard--> [Pi:8089] --> OTS
+Field ATAK  --BT/LoRa--> [Radio] --USB--> [Pi] --> OTS
+WiFi ATAK   --WiFi:8087--> [Pi] --> OTS
+```
+
+A GCP free-tier e2-micro instance acts as the relay — it has a static public IP and forwards TAK traffic through an encrypted WireGuard tunnel to the Pi. Local WiFi clients continue using `192.168.4.1:8087` with no changes.
+
+### Prerequisites
+
+- A Google Cloud account ([free tier](https://cloud.google.com/free) includes 1 e2-micro instance)
+- `gcloud` CLI installed on your computer ([install guide](https://cloud.google.com/sdk/docs/install))
+- The Pi connected to the internet (any method)
+
+### Step 1: Create the GCP Relay
+
+From your computer:
+
+```bash
+bash deploy/remote/gcp-create.sh --project YOUR_PROJECT_ID --zone europe-west2-a
+```
+
+This creates a free-tier VM with a static IP and firewall rules for WireGuard (UDP 51820) and TAK SSL (TCP 8089). Note the **public IP** it outputs.
+
+### Step 2: Set Up WireGuard on the Relay
+
+```bash
+# Copy the setup script to the instance
+gcloud compute scp deploy/remote/relay-setup.sh tak-relay:~ --zone=europe-west2-a
+
+# SSH in and run it
+gcloud compute ssh tak-relay --zone=europe-west2-a
+sudo bash relay-setup.sh
+```
+
+Note the **relay public key** it outputs — you need it for Step 3.
+
+### Step 3: Set Up the Pi Tunnel
+
+On the Pi:
+
+```bash
+sudo bash deploy/remote/pi-tunnel.sh \
+    --relay-ip RELAY_PUBLIC_IP \
+    --relay-key RELAY_PUBLIC_KEY
+```
+
+Note the **Pi public key** it outputs — you need it for Step 4.
+
+### Step 4: Connect the Tunnel
+
+Back on the relay (via SSH):
+
+```bash
+sudo bash add-peer.sh PI_PUBLIC_KEY
+```
+
+Verify the tunnel is up:
+```bash
+ping -c 3 10.0.0.2    # should reach the Pi
+```
+
+### Step 5: Verify OTS SSL
+
+On the Pi:
+
+```bash
+sudo bash deploy/remote/enable-tls.sh
+```
+
+This checks that OTS is listening on SSL port 8089 and the CA certificate exists.
+
+### Step 6: Generate Client Certificates
+
+1. Open the OTS web UI: `http://192.168.4.1` (from the Pi's WiFi)
+2. Go to **Certificates** → **Certificate Enrollment**
+3. Create enrollment credentials (username + password) for each remote user
+
+### Step 7: Connect Remote ATAK Clients
+
+On each remote ATAK device (needs internet, NOT on the Pi's WiFi):
+
+1. Open ATAK → **Settings** → **Network Preferences** → **TAK Server connections** → **Add**
+2. Enter:
+   - Address: `RELAY_PUBLIC_IP` (the static IP from Step 1)
+   - Port: `8089`
+   - Protocol: **SSL**
+   - Enable **Enroll for Client Certificate**
+   - Enter the enrollment username and password from Step 6
+3. ATAK downloads and installs the certificate automatically
+4. You should see all field and WiFi operators on the map
+
+### Tunnel Recovery
+
+The tunnel is resilient:
+- **Pi reboots**: `wg-quick@wg0` is enabled on boot — the tunnel reconnects automatically
+- **NAT changes** (new hotspot, IP change): the Pi sends a keepalive every 25 seconds, re-establishing the NAT mapping
+- **Relay reboots**: same — WireGuard starts on boot
+- **Long downtime**: just power on both devices, the tunnel re-establishes within seconds
+
 ## Admin Commands
 
 ```bash
@@ -309,6 +413,12 @@ deploy/
   mesh-bridge.service # systemd unit
   ots_patches/        # patches for known OTS bugs
   fix_firehose.py     # diagnostic: manual firehose queue binding (not needed on Python 3.12)
+  remote/             # WireGuard relay scripts for internet access
+    gcp-create.sh     #   create GCP free-tier relay instance
+    relay-setup.sh    #   configure WireGuard + iptables on relay
+    add-peer.sh       #   add Pi as WireGuard peer
+    pi-tunnel.sh      #   configure WireGuard tunnel on Pi
+    enable-tls.sh     #   verify OTS SSL and guide cert setup
 ```
 
 ## Related Projects
