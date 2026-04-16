@@ -83,7 +83,7 @@ class MqttShim:
         pub.subscribe(self._on_mesh_receive, "meshtastic.receive")
 
         # Connect to MQTT (uplink: serial → OTS)
-        self._mqtt = mqtt.Client(client_id="mesh-shim", protocol=mqtt.MQTTv311)
+        self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mesh-shim", protocol=mqtt.MQTTv311)
         self._mqtt.username_pw_set(self.mqtt_user, self.mqtt_pass)
         self._mqtt.on_connect = self._on_mqtt_connect
         self._mqtt.on_message = self._on_mqtt_message
@@ -149,13 +149,13 @@ class MqttShim:
         mp.encrypted = ciphertext  # Setting encrypted clears decoded (oneof)
         return mp
 
-    def _on_mqtt_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_mqtt_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
             topic = f"{MQTT_ROOT}/2/e/{self._channel_id}/+"
             client.subscribe(topic)
             logger.info("MQTT connected, subscribed to %s", topic)
         else:
-            logger.error("MQTT connection failed: rc=%d", rc)
+            logger.error("MQTT connection failed: %s", reason_code)
 
     # ── Serial → MQTT (uplink) ──────────────────────────────────────
 
@@ -274,12 +274,11 @@ class MqttShim:
 
     @staticmethod
     def _fix_atak_payload(payload: bytes) -> bytes:
-        """Strip |UUID suffix from TAKPacket device_callsign to prevent OTS KeyError.
+        """Strip |UUID suffix from device_callsign in uncompressed TAKPackets.
 
-        OTS extracts contact.device_callsign from TAKPackets and uses it as a
-        cache key. ATAK appends |UUID to the device_callsign which doesn't
-        match the meshtastic_devices cache, causing a KeyError that tears down
-        the entire RabbitMQ connection.
+        OTS uses device_callsign as a cache key, but ATAK appends |UUID per-message.
+        Compressed packets are passed through — the OTS-side patch handles those
+        (deploy/ots_patches/meshtastic_device_callsign.patch).
         """
         try:
             tak = atak_pb2.TAKPacket()
@@ -288,7 +287,7 @@ class MqttShim:
             return payload
 
         if tak.is_compressed:
-            return MqttShim._fix_compressed_atak(payload)
+            return payload
 
         if tak.HasField("contact") and "|" in tak.contact.device_callsign:
             original = tak.contact.device_callsign
@@ -296,16 +295,6 @@ class MqttShim:
             logger.info("Fixed device_callsign: %s → %s", original, tak.contact.device_callsign)
             return tak.SerializeToString()
 
-        return payload
-
-    @staticmethod
-    def _fix_compressed_atak(payload: bytes) -> bytes:
-        """Pass through compressed TAKPackets — rely on OTS-side patch for device_callsign fix.
-
-        Fixing compressed packets required unishox2 decompress/recompress which caused
-        malloc heap corruption crashes (the C .so isn't thread-safe). The OTS patch
-        (deploy/ots_patches/meshtastic_device_callsign.patch) handles this server-side.
-        """
         return payload
 
     # ── Self-SA: register B10 as ATAK device on the mesh ──────────

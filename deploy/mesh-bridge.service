@@ -12,7 +12,6 @@ Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 Environment=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-EnvironmentFile=-/opt/blufor-tracker/deploy/upstream.env
 
 [Install]
 WantedBy=multi-user.target
