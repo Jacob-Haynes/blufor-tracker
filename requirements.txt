@@ -3,4 +3,3 @@ meshtastic
 paho-mqtt
 pika
 pytak
-takproto
