@@ -10,6 +10,7 @@ to ATAK_PLUGIN TAKPackets for the mesh.
 """
 
 import argparse
+import json
 import logging
 import struct
 import threading
@@ -21,6 +22,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from meshtastic.protobuf import atak_pb2, mesh_pb2, mqtt_pb2, portnums_pb2
 from meshtastic.serial_interface import SerialInterface
 from pubsub import pub
+
+from bridge.cot_converter import parse_cot_event
 
 logger = logging.getLogger("mqtt_shim")
 
@@ -401,7 +404,6 @@ class MqttShim:
 
     def _on_firehose_cot(self, body: bytes):
         """Process a CoT event from the firehose — relay GeoChat to mesh as ATAK_PLUGIN."""
-        import json
         try:
             raw = body.decode("utf-8", errors="replace")
 
@@ -418,7 +420,6 @@ class MqttShim:
             if 'type="b-t-f"' not in xml_str:
                 return
 
-            from bridge.cot_converter import parse_cot_event
             parsed = parse_cot_event(xml_str)
             if not parsed:
                 logger.warning("Firehose: could not parse GeoChat CoT")
