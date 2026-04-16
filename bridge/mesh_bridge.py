@@ -336,17 +336,6 @@ class MeshBridge:
         return cot_xml[start:end]
 
     @staticmethod
-    def _extract_type(cot_xml: str) -> str | None:
-        start = cot_xml.find('type="')
-        if start < 0:
-            return None
-        start += 6
-        end = cot_xml.find('"', start)
-        if end < 0:
-            return None
-        return cot_xml[start:end]
-
-    @staticmethod
     def _is_duplicate(uid: str) -> bool:
         now = time.time()
         if uid in _recent_uids and (now - _recent_uids[uid]) < _DEDUP_WINDOW:
