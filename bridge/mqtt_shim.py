@@ -28,7 +28,7 @@ from meshtastic.protobuf import atak_pb2, mesh_pb2, mqtt_pb2, portnums_pb2
 from meshtastic.serial_interface import SerialInterface
 from pubsub import pub
 
-from bridge import meshbus
+from bridge import channel_url, meshbus
 from bridge.heartbeat import Heartbeat, short_hostname
 
 HEARTBEAT_TOOL = "blufor-tracker"
@@ -125,6 +125,9 @@ class MqttShim:
             logger.info("Channel key loaded (%d-bit AES)", len(self._channel_key) * 8)
         else:
             logger.warning("No channel key — packets will be sent unencrypted")
+
+        # Channel URL for the launcher's onboarding QR (contains the PSK; never logged)
+        channel_url.update_from_interface(self._interface)
 
         # Subscribe to mesh receive events
         pub.subscribe(self._on_mesh_receive, "meshtastic.receive")
@@ -407,11 +410,17 @@ class MqttShim:
     # ── Self-SA: register B10 as ATAK device on the mesh ──────────
 
     _SELF_SA_INTERVAL = 30  # seconds
+    _CHANNEL_URL_INTERVAL = 60  # seconds between channel-URL change checks
 
     def _start_self_sa(self):
         """Periodically send a PLI TAKPacket so ATAK clients recognise B10."""
         def _sa_loop():
+            last_url_check = time.monotonic()
             while self._running:
+                if time.monotonic() - last_url_check >= self._CHANNEL_URL_INTERVAL:
+                    # picks up channel changes made through this interface's cached node config
+                    channel_url.update_from_interface(self._interface)
+                    last_url_check = time.monotonic()
                 try:
                     self._send_self_sa()
                 except Exception:

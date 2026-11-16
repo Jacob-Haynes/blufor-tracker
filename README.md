@@ -267,6 +267,17 @@ Only one process can open the Meshtastic serial port, and that is the bridge. Ot
 
 The Macs on the hotspot reach the broker at `isr-pi.local:1883`. RabbitMQ's `guest` account only works from the Pi itself, so they log in as the `isrkit` user, which the platform install creates. The bridge serves `meshbus/tx` from **any** authenticated client, whoever publishes it. That user needs RabbitMQ write permission on the `amq.topic` exchange for `meshbus/tx` and `isrkit/#`.
 
+### Channel URL for Onboarding
+
+When the radio connects, the bridge writes the radio's channel URL (`localNode.getURL()`) to `/var/lib/blufor-tracker/channel-url`. It re-checks every 60 s and rewrites the file only when the URL changes. The launcher shows it as a PIN-gated QR code, so new nodes can join on the day.
+
+The URL **contains the channel key**, so it is handled carefully:
+- it is never logged;
+- it is written atomically (temp file + rename) with mode 0640;
+- the file belongs to group `isr-launcher`, and the install creates that group, adds the bridge user to it and makes the directory setgid 2750.
+
+The 60 s check sees channel changes the radio reports to the bridge at connect. A change made from another device while the bridge is running is picked up when the bridge reconnects (`sudo systemctl restart mesh-bridge`). `CHANNEL_URL_FILE=` (empty) disables it.
+
 ## Demo-Day Self-Check
 
 On the Pi, with the profile running:
@@ -463,6 +474,7 @@ bridge/
   meshbus.py          # meshbus/tx + meshbus/rx: lets other tools share the radio
   heartbeat.py        # isrkit/heartbeat/blufor-tracker (kit-wide status for the launcher)
   check.py            # demo-day self-check: TAK send/receive, MQTT, heartbeats
+  channel_url.py      # writes the channel URL (PSK!) for the launcher's onboarding QR
   cot_converter.py    # CoT XML <-> Meshtastic packet conversion
   mesh_bridge.py      # legacy: direct PyTAK TCP bridge with simulation mode
   upstream_relay.py   # optional upstream TAK server relay (used by mesh_bridge)

@@ -54,6 +54,13 @@ if [ "$REPO_DIR" != "$APP_DIR" ]; then
     cp -r "$REPO_DIR/bridge" "$REPO_DIR/requirements.txt" "$REPO_DIR/deploy" "$REPO_DIR/profiles.d" "$APP_DIR/"
 fi
 chown -R "$USER:$USER" "$APP_DIR" "$DATA_DIR"
+# The launcher reads $DATA_DIR/channel-url (channel QR, contains the PSK) via group isr-launcher.
+# setgid dir: files the bridge creates there inherit the group; others cannot read it.
+getent group isr-launcher >/dev/null || groupadd --system isr-launcher
+usermod -aG isr-launcher "$USER"
+chgrp isr-launcher "$DATA_DIR"
+chmod 2750 "$DATA_DIR"
+[ -f "$DATA_DIR/channel-url" ] && chgrp isr-launcher "$DATA_DIR/channel-url" && chmod 0640 "$DATA_DIR/channel-url"
 
 # 3. Bridge venv + deps
 echo "[3/7] Setting up bridge Python environment..."
