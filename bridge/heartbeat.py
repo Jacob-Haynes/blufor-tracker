@@ -11,6 +11,7 @@ The launcher on the Pi reads these. ``detail`` is an optional extra. On a clean 
 publishes the MQTT will (``"error"``, "connection lost").
 
 Environment: ``MQTT_HOST/PORT/USER/PASS`` (defaults 127.0.0.1:1883 guest/guest),
+``ISR_HOST`` sets the station name (default: lowercased short hostname),
 ``PUBLIC_URL`` overrides the advertised UI URL, ``HEARTBEAT=0`` disables it.
 Must never take the tool down: every failure is logged and ignored.
 """
@@ -35,7 +36,11 @@ STATUSES = ("ok", "degraded", "error", "stopped")
 
 
 def short_hostname() -> str:
-    return socket.gethostname().split(".")[0]
+    """Station name (contract C4.1): ``ISR_HOST`` if set, else the lowercased short hostname."""
+    env = os.environ.get("ISR_HOST", "").strip()
+    if env:
+        return env
+    return socket.gethostname().split(".")[0].lower()
 
 
 def default_url(port: int | None, path: str = "/") -> str:
