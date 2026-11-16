@@ -68,7 +68,18 @@ To choose the hotspot name or password (at least 8 characters), pass them in or 
 sudo HOTSPOT_SSID="MyTAK" HOTSPOT_PASS="a-long-passphrase" bash deploy/install.sh
 ```
 
-**Do not reboot yet** — configure the radios first (Step 2).
+#### The OpenTAKServer installer
+
+Step 4 of the install runs the upstream OpenTAKServer Pi installer (`https://i.opentakserver.io/raspberry_pi_installer`) through `deploy/ots_install.sh`. It is never piped from curl into bash:
+- **Download first.** It is downloaded to a temp file and its sha256 is printed. Set `OTS_INSTALLER_SHA256` to refuse anything else.
+- **Pseudo-terminal with set answers.** The upstream installer reads its questions from the terminal (`/dev/tty`), not from input, and ignores environment variables. Without a terminal (pi-profiles bootstrap, ssh without `-t`, systemd) it loops forever and fills the disk with log. So it runs under a pseudo-terminal and is answered **n** to ZeroTier and **n** to Mumble Server.
+- **Stopped if it misbehaves.** The run is aborted (exit 3) on more than 100,000 lines of output, repeated "Invalid input", 20 minutes with no output, or 90 minutes in total. The full output is in `/var/log/blufor-tracker/ots-install.log`.
+- **Earlier OTS install.** If PostgreSQL already has an `ots` role, the installer asks for its password. Pass it as `OTS_PG_PASSWORD=... sudo -E bash deploy/install.sh`; otherwise the install stops before running anything.
+- If any of this fails, the error message gives the command to run step 4 by hand in a terminal.
+
+**The OTS installer runs `apt upgrade -y`**, which can install a new kernel (it did on the demo Pi), so a reboot is needed afterwards. The install says "REBOOT NEEDED" at the end. It also enables the OTS services at boot.
+
+**Do not reboot yet**: configure the radios first (Step 2), then reboot as that step says.
 
 ## Step 2: Configure the Radios
 

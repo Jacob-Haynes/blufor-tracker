@@ -70,13 +70,18 @@ sudo -u "$USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" 
 
 # 4. OpenTAKServer
 echo "[4/7] Installing OpenTAKServer..."
+OTS_JUST_INSTALLED=0
 # Installed-but-stopped (e.g. pi-profiles switched it off) must not re-run the OTS installer
 if systemctl list-unit-files opentakserver.service 2>/dev/null | grep -q '^opentakserver.service'; then
     echo "OpenTAKServer already installed — skipping."
 else
     echo "Running OpenTAKServer Pi installer as $USER..."
-    echo "This installs PostgreSQL, RabbitMQ, nginx, and OpenTAKServer."
-    sudo -u "$USER" bash -c 'curl https://i.opentakserver.io/raspberry_pi_installer -Ls | bash -'
+    echo "This installs PostgreSQL, RabbitMQ, nginx, and OpenTAKServer, and runs apt upgrade."
+    # Never `curl | bash`: the installer reads its answers from /dev/tty, which loops forever with
+    # no terminal. ots_install.sh downloads it, prints its sha256, answers under a pseudo-tty and
+    # aborts on a runaway/stalled run (see the script header).
+    OTS_USER="$USER" bash "$SCRIPT_DIR/ots_install.sh"
+    OTS_JUST_INSTALLED=1
 
     # Configure OTS to listen on port 8087 (standard TAK port)
     OTS_CONFIG="$USER_HOME/ots/config.yml"
@@ -190,6 +195,11 @@ echo "WiFi hotspot: $HOTSPOT_SSID  (password in $ENV_FILE: sudo grep HOTSPOT_PAS
 echo "OTS Web UI:   http://192.168.4.1"
 echo "TAK Server:   192.168.4.1:8087 (TCP)"
 echo ""
+if [ "$OTS_JUST_INSTALLED" = 1 ] || [ -f /var/run/reboot-required ]; then
+    echo "REBOOT NEEDED: the OpenTAKServer installer ran 'apt upgrade', which can install a new kernel."
+    echo "  sudo reboot"
+    echo ""
+fi
 if [ -n "$PI_IPS" ]; then
     echo "Pi IP addresses:"
     echo "$PI_IPS" | while read -r ip; do echo "  $ip"; done
