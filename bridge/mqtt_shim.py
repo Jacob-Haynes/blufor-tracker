@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import random
+import signal
 import struct
 import sys
 import threading
@@ -28,6 +29,14 @@ from meshtastic.serial_interface import SerialInterface
 from pubsub import pub
 
 from bridge import meshbus
+from bridge.heartbeat import Heartbeat, short_hostname
+
+HEARTBEAT_TOOL = "blufor-tracker"
+
+
+def _ots_url() -> str:
+    # The bridge has no UI of its own; the launcher links to the OTS web UI on this host
+    return os.environ.get("PUBLIC_URL") or f"http://{short_hostname()}.local/"
 from bridge.cot_converter import parse_cot_event
 
 logger = logging.getLogger("mqtt_shim")
@@ -75,9 +84,19 @@ class MqttShim:
         # threads; serialise writes so packets are not interleaved on the wire.
         self._send_lock = threading.Lock()
         self._meshbus = meshbus.MeshbusGateway(self._meshbus_send)
+        self._radio_state = "starting"
+        self._heartbeat = Heartbeat(HEARTBEAT_TOOL, self._heartbeat_state, url=_ots_url())
+
+    def _heartbeat_state(self):
+        if self._interface is None:
+            return "cpu", "degraded", f"waiting for radio ({self.port})"
+        mqtt_ok = bool(self._mqtt and self._mqtt.is_connected())
+        detail = f"radio {self._gateway_id} on {self.port}; meshbus sent {self._meshbus.stats['sent']}"
+        return "cpu", "ok" if mqtt_ok else "degraded", detail if mqtt_ok else detail + "; OTS MQTT down"
 
     def start(self):
         self._running = True
+        self._heartbeat.start()
 
         # Connect to Meshtastic serial (waits for the radio to be plugged in)
         self.port = self._wait_for_radio(self.port)
@@ -138,6 +157,7 @@ class MqttShim:
             logger.info("Shutting down")
         finally:
             self._running = False
+            self._heartbeat.stop()
             if self._mqtt:
                 self._mqtt.loop_stop()
                 self._mqtt.disconnect()
@@ -574,6 +594,11 @@ class SimulatedMeshbus:
         self._mqtt.on_message = lambda c, u, m: self._gateway.submit(m.payload)
         self._mqtt.reconnect_delay_set(min_delay=1, max_delay=30)
         self._mqtt.connect_async(mqtt_host, mqtt_port, keepalive=60)
+        self._heartbeat = Heartbeat(
+            HEARTBEAT_TOOL,
+            lambda: ("simulate", "ok" if self._mqtt.is_connected() else "degraded", "simulated mesh, no radio"),
+            url=_ots_url(),
+        )
 
     @staticmethod
     def _fake_send(text, to, channel):
@@ -582,6 +607,7 @@ class SimulatedMeshbus:
     def run(self):
         self._mqtt.loop_start()
         self._gateway.start()
+        self._heartbeat.start()
         logger.info("Simulation mode — meshbus only, fake mesh texts every ~%.0fs", self._interval)
         try:
             while True:
@@ -600,6 +626,8 @@ class SimulatedMeshbus:
                     logger.info("SIM meshbus RX from=%s: %s", node_id, msg["text"])
         except KeyboardInterrupt:
             pass
+        finally:
+            self._heartbeat.stop()
 
 
 def main():
@@ -621,6 +649,9 @@ def main():
     parser.add_argument("--simulate", action="store_true",
                         help="No radio/OTS: serve meshbus with fake mesh texts (for testing other tools)")
     args = parser.parse_args()
+
+    # systemd stops us with SIGTERM: exit through the normal path so the heartbeat says "stopped"
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     if args.simulate:
         SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass).run()
