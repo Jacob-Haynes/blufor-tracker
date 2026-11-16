@@ -4,10 +4,14 @@
     python -m bridge.check --mesh-text "radio check"   # also transmit a real mesh text via meshbus
 
 Checks:
-1. **TAK send + receive through OpenTAKServer.** Connection A says hello (uid + contact, as
-   tac-advisor does) and listens; connection B sends a test marker with no hello, as the sensor
-   tools do. PASS means OTS routed B's event to A. It proves the CoT port, the sender path
-   and the listener path in one go. The test marker is already stale, so ATAK won't draw it.
+1. **TAK send + receive through OpenTAKServer** (kit contract v5, ``bridge.tak_client``).
+   Two registered clients with stable identities, ``isrkit-check-a-<host>`` / "CHECK-A <host>"
+   and ``isrkit-check-b-<host>`` / "CHECK-B <host>", each waiting 3 s after connect before
+   its SA. B listens; A sends a test marker (already stale, so ATAK won't draw it). The result
+   is one of: "round-trip OK", "unregistered sender dropped" (OTS on PostgreSQL drops CoT whose
+   sender has no EUD row, e.g. a callsign already taken by another uid) or "listener not bound"
+   (OTS never subscribed B, e.g. it registered before OTS's RabbitMQ channel opened). On the
+   Pi it also looks the two uids up in OTS's ``euds`` table via ``psql`` when it can.
 2. **MQTT broker** (OTS RabbitMQ) accepts our login.
 3. **Heartbeats**: every retained ``isrkit/heartbeat/#`` message, with its status and age.
 4. Optional: publish ``--mesh-text`` to ``meshbus/tx`` (the bridge transmits it on the mesh).
@@ -33,13 +37,6 @@ def _t(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _event(uid: str, callsign: str, cot_type: str = "a-f-G-U-C", extra: str = "") -> str:
-    now = _t(time.time())
-    return (f'<event version="2.0" uid={quoteattr(uid)} type="{cot_type}" how="h-g-i-g-o" '
-            f'time="{now}" start="{now}" stale="{now}"><point lat="0" lon="0" hae="0" ce="9999999" '
-            f'le="9999999"/><detail><contact callsign={quoteattr(callsign)}/>{extra}</detail></event>')
-
-
 OTS_DEFAULT_TCP_PORT = 8088  # OTS's own default OTS_TCP_STREAMING_PORT
 
 
@@ -61,40 +58,123 @@ def explain_no_listener(host: str, port: int, error: OSError) -> str:
             f"nothing on {OTS_DEFAULT_TCP_PORT} either. Is opentakserver running?")
 
 
-def check_tak(host: str, port: int, timeout: float = 8.0) -> tuple[bool, str]:
-    tag = uuid.uuid4().hex[:8]
+CHECK_MARKER_PREFIX = "ISR-CHECK-"
+
+
+def _marker(uid: str, now: float | None = None) -> str:
+    """Test marker: already stale (never drawn), no position."""
+    now = time.time() if now is None else now
+    t = _t(now)
+    return (f'<event version="2.0" uid={quoteattr(uid)} type="a-u-G" how="h-g-i-g-o" time="{t}" '
+            f'start="{t}" stale="{t}"><point lat="0" lon="0" hae="9999999" ce="9999999" le="9999999"/>'
+            f'<detail><remarks>isr-kit self-check marker</remarks></detail></event>')
+
+
+def euds_lookup(uids: list[str], callsigns: list[str], config: str | None = None) -> dict | None:
+    """OTS's euds rows for these uids/callsigns via psql, or None if that isn't possible here.
+
+    Reads SQLALCHEMY_DATABASE_URI from ~/ots/config.yml (OTS_CONFIG overrides). Returns
+    {"by_uid": {uid: callsign}, "by_callsign": {callsign: uid}}."""
+    import re
+    import shutil
+    import subprocess
+
+    path = config or os.environ.get("OTS_CONFIG") or os.path.expanduser("~/ots/config.yml")
+    if not shutil.which("psql") or not os.path.exists(path):
+        return None
     try:
-        a = socket.create_connection((host, port), timeout=5)
+        text = open(path).read()
+    except OSError:
+        return None
+    m = re.search(r"^SQLALCHEMY_DATABASE_URI:\s*['\"]?(postgresql[^'\"\s]*)", text, re.M)
+    if not m:
+        return None
+    uri = re.sub(r"^postgresql\+\w+://", "postgresql://", m.group(1))
+
+    def q(v: str) -> str:
+        return "'" + v.replace("'", "''") + "'"
+
+    sql = (f"SELECT uid, coalesce(callsign, '') FROM euds WHERE uid IN ({','.join(map(q, uids))}) "
+           f"OR callsign IN ({','.join(map(q, callsigns))})")
+    from urllib.parse import unquote, urlsplit, urlunsplit
+
+    parts = urlsplit(uri)
+    env = dict(os.environ)
+    if parts.password:  # pass it via the environment, not on the command line (ps shows argv)
+        env["PGPASSWORD"] = unquote(parts.password)
+        netloc = parts.netloc.split("@", 1)[1]
+        user = parts.username or ""
+        uri = urlunsplit((parts.scheme, f"{user}@{netloc}" if user else netloc, parts.path, "", ""))
+    try:
+        out = subprocess.run(["psql", uri, "-tAF", "|", "-c", sql], capture_output=True, text=True,
+                             timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    rows = [ln.split("|", 1) for ln in out.stdout.splitlines() if "|" in ln]
+    return {"by_uid": {u: c for u, c in rows}, "by_callsign": {c: u for u, c in rows if c}}
+
+
+def check_tak(host: str, port: int, timeout: float = 8.0, station: str | None = None,
+              register_delay: float | None = None, db=euds_lookup) -> tuple[bool, str]:
+    from bridge.tak_client import TakClient
+
+    try:
+        socket.create_connection((host, port), timeout=5).close()
     except OSError as e:
         return False, explain_no_listener(host, port, e)
+
+    got_a: list[str] = []
+    got_b: list[str] = []
+    b = TakClient("check-b", "CHECK-B", host=host, port=port, station=station, on_event=got_b.append,
+                  register_delay=register_delay, sensor_lat=0.0, sensor_lon=0.0, device="blufor-tracker")
+    a = TakClient("check-a", "CHECK-A", host=host, port=port, station=station, on_event=got_a.append,
+                  register_delay=register_delay, sensor_lat=0.0, sensor_lon=0.0, device="blufor-tracker")
+    marker_uid = f"{CHECK_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
+    wait_reg = (b.register_delay or 0) + 10
     try:
-        b = socket.create_connection((host, port), timeout=5)
-    except OSError as e:
-        a.close()
-        return False, f"cannot open a second connection to {host}:{port} ({e})"
-    try:
-        a.sendall(_event(f"ISR-CHECK-RX-{tag}", f"ISR-CHECK-RX-{tag}",
-                         extra='<takv platform="isr-check" device="pi" os="linux" version="1"/>').encode())
-        time.sleep(1.0)  # let OTS bind A's queue
-        b.sendall(_event(f"ISR-CHECK-TX-{tag}", f"ISR-CHECK-TX-{tag}", cot_type="a-u-G").encode())
-        a.settimeout(0.5)
-        got = b""
+        b.start()
+        if not b.wait_registered(wait_reg):
+            return False, f"CHECK-B could not connect and register at {host}:{port} ({b.last_error})"
+        a.start()
+        if not a.wait_registered(wait_reg):
+            return False, f"CHECK-A could not connect and register at {host}:{port} ({a.last_error})"
+        a.send(_marker(marker_uid))
+        b.send_sa_now()  # lets A tell whether OTS relays B at all
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                data = a.recv(65536)
-            except socket.timeout:
-                continue
-            if not data:
-                return False, "OTS closed the listener connection"
-            got += data
-            if f"ISR-CHECK-TX-{tag}".encode() in got:
-                return True, f"OTS at {host}:{port} routed a sender's CoT to a listener"
-        return False, (f"connected to {host}:{port} but the test event never came back within {timeout:.0f}s "
-                       "(wrong port? not OTS? OTS cot_parser not running?)")
+        while time.time() < deadline and not any(marker_uid in e for e in got_b):
+            time.sleep(0.1)
     finally:
-        a.close()
-        b.close()
+        a.stop()
+        b.stop()
+
+    if any(marker_uid in e for e in got_b):
+        return True, f"round-trip OK: OTS at {host}:{port} stored and relayed CHECK-A's marker to CHECK-B"
+
+    b_saw_a = any(a.uid in e for e in got_b)
+    a_saw_b = any(b.uid in e for e in got_a)
+    rows = db([a.uid, b.uid], [a.callsign, b.callsign]) if db else None
+    if rows is not None:
+        owner = rows["by_callsign"].get(a.callsign)
+        if a.uid not in rows["by_uid"]:
+            why = (f"callsign '{a.callsign}' already belongs to uid {owner}" if owner and owner != a.uid
+                   else "no EUD row was created")
+            return False, (f"unregistered sender dropped: {a.uid} is not in OTS's euds table ({why}), "
+                           "so OTS drops its CoT")
+        return False, (f"listener not bound: both clients are registered in euds, but CHECK-B received "
+                       f"nothing{' (CHECK-A did receive CHECK-B)' if a_saw_b else ''}. OTS subscribed it "
+                       "before its RabbitMQ channel opened? Retry with TAK_REGISTER_DELAY_S=6")
+    if b_saw_a:
+        return False, ("unregistered sender dropped? CHECK-A's SA reached CHECK-B but its marker did not "
+                       "(check cot_parser.log for ForeignKeyViolation)")
+    if a_saw_b:
+        return False, ("unregistered sender dropped or listener not bound: CHECK-A received CHECK-B, but "
+                       "nothing from CHECK-A reached CHECK-B. Likely CHECK-A's callsign is taken in euds "
+                       "(run this on the Pi with psql to tell). See cot_parser.log for ForeignKeyViolation")
+    return False, ("listener not bound: neither client received anything from the other, so OTS bound "
+                   "neither connection, or dropped both senders (cot_parser.log: ForeignKeyViolation?). "
+                   "Retry with TAK_REGISTER_DELAY_S=6")
 
 
 def check_mqtt(host: str, port: int, user: str, password: str, mesh_text: str | None, wait: float = 3.0):

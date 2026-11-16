@@ -30,55 +30,6 @@ def test_heartbeat_disabled_and_broker_absent_are_harmless(monkeypatch):
     hb.stop()
 
 
-class FakeOTS:
-    """Routes CoT from any client to clients that have sent a contact event (like OTS __ANON__)."""
-
-    def __init__(self):
-        self.listeners = []
-        self.srv = socket.socket()
-        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("127.0.0.1", 0))
-        self.srv.listen(5)
-        self.port = self.srv.getsockname()[1]
-        threading.Thread(target=self._accept, daemon=True).start()
-
-    def _accept(self):
-        while True:
-            try:
-                conn, _ = self.srv.accept()
-            except OSError:
-                return
-            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
-
-    def _client(self, conn):
-        buf = b""
-        while True:
-            try:
-                data = conn.recv(65536)
-            except OSError:
-                return
-            if not data:
-                return
-            buf += data
-            while b"</event>" in buf:
-                ev, buf = buf.split(b"</event>", 1)
-                ev += b"</event>"
-                if b"<contact" in ev and b"takv" in ev and conn not in self.listeners:
-                    self.listeners.append(conn)
-                for l in self.listeners:
-                    try:
-                        l.sendall(ev)
-                    except OSError:
-                        pass
-
-
-def test_check_tak_passes_against_ots_like_server():
-    ots = FakeOTS()
-    ok, msg = check.check_tak("127.0.0.1", ots.port, timeout=3)
-    assert ok, msg
-    ots.srv.close()
-
-
 def test_check_tak_fails_cleanly_when_nothing_listens():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

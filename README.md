@@ -301,7 +301,7 @@ cd /opt/blufor-tracker && .venv/bin/python -m bridge.check
 ```
 
 It prints PASS/FAIL for:
-- **TAK.** One connection sends a stale test marker, and a second connection (which said hello) must receive it back through OpenTAKServer. That proves port 8087, the sender path the sensor tools use and the listener path tac-advisor uses.
+- **TAK.** Two clients register the way every kit tool does (`bridge/tak_client.py`, contract v5: wait 3 s after connecting, then an SA with a stable, unique uid and callsign), as `CHECK-A <host>` and `CHECK-B <host>`. A sends a stale test marker and B must receive it through OpenTAKServer. That proves port 8087 and the same sender and listener paths the tools use. The result is `round-trip OK`, `unregistered sender dropped` (OTS drops CoT from a sender with no EUD row, e.g. when its callsign belongs to another uid) or `listener not bound`. When `psql` and `~/ots/config.yml` are available (on the Pi), it looks both uids up in OTS's `euds` table to say which.
 - **MQTT login.**
 
 Then it lists every tool's retained heartbeat with status and age. It exits non-zero on failure.

@@ -1,0 +1,255 @@
+"""ISR-kit TAK client (contract v5): one registered, long-lived TCP connection to OpenTAKServer.
+
+Why (OpenTAKServer 1.8.3 on PostgreSQL, from its source):
+
+1. CoT whose sender has no row in OTS's ``euds`` table is **dropped**, not just left out of the
+   history: cot_parser's insert fails a foreign key and the event is never routed.
+   A connection's sender is the uid of the first event on it that has a ``<contact>``.
+2. OTS only subscribes a connection to the relay if that first ``<contact>`` event arrives
+   *after* its internal RabbitMQ channel has opened (asynchronously, shortly after connect),
+   and never retries. A client that registers at once can send but never receives.
+3. ``euds.callsign`` is unique: a new uid with a callsign already taken silently gets no row,
+   so everything it sends is dropped by (1).
+
+So, per tool process (C5.1-C5.4):
+
+* one TCP connection to ``TAK_HOST:TAK_PORT``, reconnecting with backoff;
+* on every (re)connect, wait ``REGISTER_DELAY_S`` (3 s), then send a registration SA:
+  uid ``isrkit-<repo>-<ISR_HOST>``, callsign ``<SHORT> <ISR_HOST>`` (stable, unique per
+  tool and station), type ``a-f-G-E-S``, ``<contact endpoint="*:-1:stcp">``,
+  ``<__group name="Cyan" role="Team Member">``, ``<takv platform="isr-kit" device="<repo>">``,
+  at ``SENSOR_LAT``/``SENSOR_LON`` with stale now+120 s, re-sent every 60 s. With no position
+  set: point 0,0 with ce/le/hae 9999999 and stale = start, so it is never drawn;
+* every marker goes on that same connection, and only after registration (queued until then);
+* receivers pass ``on_event`` and get every CoT event OTS relays to them.
+
+Self-contained (stdlib only); the same file is in each kit repo.
+Env: ``TAK_HOST`` (127.0.0.1), ``TAK_PORT`` (8087), ``ISR_HOST``, ``SENSOR_LAT``/``SENSOR_LON``,
+``TAK_REGISTER_DELAY_S`` (3; tests use less).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import queue
+import select
+import socket
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Callable
+from xml.sax.saxutils import quoteattr
+
+logger = logging.getLogger("tak_client")
+
+REGISTER_DELAY_S = 3.0
+SA_INTERVAL_S = 60.0
+SA_STALE_S = 120.0
+SA_TYPE = "a-f-G-E-S"
+PLATFORM = "isr-kit"
+QUEUE_MAX = 500
+BACKOFF_MIN, BACKOFF_MAX = 1.0, 30.0
+UNKNOWN = "9999999"
+
+
+def station_name() -> str:
+    """``ISR_HOST`` if set, else the lowercased short hostname (contract C4.1)."""
+    env = os.environ.get("ISR_HOST", "").strip()
+    return env or socket.gethostname().split(".")[0].lower()
+
+
+def _env_float(name: str) -> float | None:
+    try:
+        v = os.environ.get(name, "").strip()
+        return float(v) if v else None
+    except ValueError:
+        return None
+
+
+def cot_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def build_sa(uid: str, callsign: str, device: str, lat: float | None, lon: float | None,
+             now: float | None = None, version: str = "5") -> str:
+    """The registration SA (contract C5.2)."""
+    now = time.time() if now is None else now
+    t = cot_time(now)
+    if lat is not None and lon is not None and (lat or lon):
+        point = f'<point lat="{lat:.7f}" lon="{lon:.7f}" hae="0" ce="50" le="50"/>'
+        stale = cot_time(now + SA_STALE_S)
+    else:  # no position: the only allowed 0,0, already stale so ATAK never draws it
+        point = f'<point lat="0" lon="0" hae="{UNKNOWN}" ce="{UNKNOWN}" le="{UNKNOWN}"/>'
+        stale = t
+    return (
+        f'<event version="2.0" uid={quoteattr(uid)} type="{SA_TYPE}" how="h-g-i-g-o" '
+        f'time="{t}" start="{t}" stale="{stale}">{point}<detail>'
+        f'<contact callsign={quoteattr(callsign)} endpoint="*:-1:stcp"/>'
+        '<__group name="Cyan" role="Team Member"/>'
+        f'<takv platform="{PLATFORM}" device={quoteattr(device)} os="linux" version={quoteattr(version)}/>'
+        f"<uid Droid={quoteattr(callsign)}/>"
+        "</detail></event>"
+    )
+
+
+class CotStream:
+    """Splits a TCP byte stream into complete ``<event>...</event>`` strings."""
+
+    def __init__(self):
+        self._buf = ""
+
+    def feed(self, data: str) -> list[str]:
+        self._buf += data
+        out = []
+        while "</event>" in self._buf:
+            end = self._buf.index("</event>") + len("</event>")
+            chunk, self._buf = self._buf[:end], self._buf[end:]
+            start = chunk.rfind("<event")
+            if start >= 0:
+                out.append(chunk[start:])
+        if len(self._buf) > 1_000_000:  # garbage without an </event>: don't grow forever
+            self._buf = ""
+        return out
+
+
+class TakClient:
+    """A registered OTS client. ``send(xml)`` queues CoT; a background thread owns the socket."""
+
+    def __init__(self, repo: str, short: str, host: str | None = None, port: int | None = None,
+                 station: str | None = None, sensor_lat: float | None = None,
+                 sensor_lon: float | None = None, on_event: Callable[[str], None] | None = None,
+                 register_delay: float | None = None, sa_interval: float = SA_INTERVAL_S,
+                 uid: str | None = None, callsign: str | None = None, device: str | None = None):
+        env = os.environ.get
+        self.host = host or env("TAK_HOST", "127.0.0.1")
+        self.port = int(port or env("TAK_PORT", "8087"))
+        self.station = station or station_name()
+        self.uid = uid or f"isrkit-{repo}-{self.station}"
+        self.callsign = callsign or f"{short} {self.station}"
+        self.device = device or repo
+        self.sensor_lat = sensor_lat if sensor_lat is not None else _env_float("SENSOR_LAT")
+        self.sensor_lon = sensor_lon if sensor_lon is not None else _env_float("SENSOR_LON")
+        self.on_event = on_event
+        self.register_delay = (float(env("TAK_REGISTER_DELAY_S", REGISTER_DELAY_S))
+                               if register_delay is None else register_delay)
+        self.sa_interval = sa_interval
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=QUEUE_MAX)
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._sa_now = threading.Event()
+        self.connected = False
+        self.registered = threading.Event()
+        self.sent = 0
+        self.dropped = 0
+        self.received = 0
+        self.last_error = ""
+
+    @property
+    def has_position(self) -> bool:
+        return self.sensor_lat is not None and self.sensor_lon is not None and bool(
+            self.sensor_lat or self.sensor_lon)
+
+    def sa(self, now: float | None = None) -> str:
+        return build_sa(self.uid, self.callsign, self.device, self.sensor_lat, self.sensor_lon, now)
+
+    # ── public ────────────────────────────────────────────────────
+
+    def start(self) -> "TakClient":
+        if not self._running:
+            self._running = True
+            self._thread = threading.Thread(target=self._run, daemon=True, name=f"tak-{self.device}")
+            self._thread.start()
+        return self
+
+    def stop(self):
+        self._running = False
+
+    def send(self, xml: str) -> None:
+        """Queue one CoT event; sent on the registered connection (oldest dropped when full)."""
+        try:
+            self._queue.put_nowait(xml)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self.dropped += 1
+            except queue.Empty:
+                pass
+            self._queue.put_nowait(xml)
+
+    def send_sa_now(self):
+        self._sa_now.set()
+
+    def wait_registered(self, timeout: float) -> bool:
+        return self.registered.wait(timeout)
+
+    # ── socket thread ─────────────────────────────────────────────
+
+    def _sleep(self, seconds: float) -> bool:
+        end = time.monotonic() + seconds
+        while self._running and time.monotonic() < end:
+            time.sleep(min(0.05, max(0.0, end - time.monotonic())))
+        return self._running
+
+    def _run(self):
+        backoff = BACKOFF_MIN
+        pending: str | None = None
+        while self._running:
+            try:
+                sock = socket.create_connection((self.host, self.port), timeout=5)
+            except OSError as e:
+                self.last_error = str(e)
+                logger.warning("TAK %s:%d unavailable (%s), retry in %.0fs", self.host, self.port, e, backoff)
+                self._sleep(backoff)
+                backoff = min(backoff * 2, BACKOFF_MAX)
+                continue
+            self.connected = True
+            stream = CotStream()
+            try:
+                # OTS binds this connection to the relay only once its RabbitMQ channel is open
+                if not self._sleep(self.register_delay):
+                    break
+                sock.sendall(self.sa().encode())
+                last_sa = time.monotonic()
+                self.registered.set()
+                backoff = BACKOFF_MIN
+                logger.info("Registered with TAK %s:%d as %s (%s)", self.host, self.port, self.uid,
+                            self.callsign)
+                while self._running:
+                    if self._sa_now.is_set() or time.monotonic() - last_sa >= self.sa_interval:
+                        self._sa_now.clear()
+                        sock.sendall(self.sa().encode())
+                        last_sa = time.monotonic()
+                    readable, _, _ = select.select([sock], [], [], 0.05)
+                    if readable:
+                        data = sock.recv(65536)
+                        if not data:
+                            raise ConnectionError("TAK server closed the connection")
+                        for ev in stream.feed(data.decode("utf-8", errors="replace")):
+                            self.received += 1
+                            if self.on_event is not None:
+                                try:
+                                    self.on_event(ev)
+                                except Exception:
+                                    logger.exception("on_event failed")
+                    for _ in range(50):
+                        if pending is None:
+                            try:
+                                pending = self._queue.get_nowait()
+                            except queue.Empty:
+                                break
+                        sock.sendall(pending.encode("utf-8"))
+                        pending = None
+                        self.sent += 1
+            except OSError as e:
+                self.last_error = str(e)
+                logger.warning("TAK connection lost (%s), reconnecting", e)
+            finally:
+                self.connected = False
+                self.registered.clear()
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self._sleep(backoff)
+            backoff = min(backoff * 2, BACKOFF_MAX)
