@@ -18,7 +18,7 @@
     };
 
     // --- Map setup ---
-    var map = L.map("map", { zoomControl: false }).setView([51.1500, -1.7500], 15);
+    var map = L.map("map", { zoomControl: false }).setView([51.15, -1.75], 15);
     L.control.zoom({ position: "bottomleft" }).addTo(map);
 
     var satellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
