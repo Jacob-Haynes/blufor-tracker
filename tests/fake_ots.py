@@ -10,7 +10,15 @@
 Relayed events go to every bound connection except the sender's. ``markers`` mimics
 cot_parser.parse_marker's storage: a marker-type event with no ``<takv>``/``<contact endpoint>`` is
 stored only with a real position (``point_id`` is NOT NULL) and a ``<link uid>``, if any, that
-is an EUD uid (``parent_uid`` foreign key); failures go to ``marker_errors``. Test helper, stdlib only.
+is an EUD uid (``parent_uid`` foreign key); failures go to ``marker_errors``.
+
+4. **varchar(255) and GeoChat parsing.** Like cot_parser, an event whose uid/type/how is over 255
+   characters, or a GeoChat (``b-t-f`` with ``<__chat>``) missing ``__chat@id``, ``chatgrp@uid0`` or
+   ``remarks@time`` or with remarks over 255 characters, is nacked: recorded in ``nacked`` and
+   **not relayed**. Marker uid/callsign over 255 only fails storage (``marker_errors``).
+   Stored GeoChat goes to ``geochats`` (uid -> remarks).
+
+Test helper, stdlib only.
 """
 
 from __future__ import annotations
@@ -19,12 +27,14 @@ import re
 import socket
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 _UID = re.compile(r'<event[^>]*\suid="([^"]*)"')
 _CALLSIGN = re.compile(r'<contact[^>]*\scallsign="([^"]*)"')
 _TYPE = re.compile(r'<event[^>]*\stype="([^"]*)"')
 _POINT = re.compile(r'<point[^>]*\slat="([^"]*)"[^>]*\slon="([^"]*)"')
 _LINK = re.compile(r'<link[^>]*\suid="([^"]*)"')
+VARCHAR = 255
 _MARKER_TYPE = re.compile(r"^(a-[fhupansjk]-[ZPAGSUF]|b-m-p)")
 
 
@@ -44,6 +54,8 @@ class FakeOTS:
         self.relayed: list[str] = []  # event uids relayed
         self.markers: dict[str, str] = {}  # stored marker uid -> callsign
         self.marker_errors: list[str] = []
+        self.nacked: list[str] = []  # "<uid>: <reason>" for events cot_parser would nack
+        self.geochats: dict[str, str] = {}  # stored GeoChat uid -> remarks
         self.conns: list[_Conn] = []
         self._lock = threading.Lock()
         self._srv = socket.socket()
@@ -119,6 +131,10 @@ class FakeOTS:
             if sender not in self.euds:  # rule 1
                 self.dropped.append(sender)
                 return
+            reason = self._parse_error(ev)
+            if reason:  # cot_parser: "Failed to parse CoT", basic_nack, route_cot never runs
+                self.nacked.append(f"{ev_uid[:60]}: {reason}")
+                return
             self.relayed.append(ev_uid)
             self._store_marker(ev, ev_uid)
             targets = [o for o in self.conns if o.bound and o.uid != sender]
@@ -127,6 +143,29 @@ class FakeOTS:
                 o.sock.sendall(ev.encode())
             except OSError:
                 pass
+
+    def _parse_error(self, ev: str) -> str | None:
+        try:
+            root = ET.fromstring(ev)
+        except ET.ParseError as e:
+            return f"bad XML ({e})"
+        for attr in ("uid", "type", "how"):
+            if len(root.get(attr, "")) > VARCHAR:
+                return f"value too long for type character varying(255) (cot.{attr})"
+        chat = root.find("detail/__chat")
+        if root.get("type") == "b-t-f" and chat is not None:
+            remarks = root.find("detail/remarks")
+            if remarks is None:
+                return None  # OTS skips chat without remarks
+            grp = chat.find("chatgrp")
+            if chat.get("id") is None or grp is None or grp.get("uid0") is None or remarks.get("time") is None:
+                return "GeoChat missing __chat@id / chatgrp@uid0 / remarks@time"
+            for name, value in (("remarks", remarks.text or ""), ("uid", root.get("uid", "")),
+                                ("chatroom_id", chat.get("id", "")), ("sender_uid", grp.get("uid0", ""))):
+                if len(value) > VARCHAR:
+                    return f"value too long for type character varying(255) (geochat.{name})"
+            self.geochats[root.get("uid", "")] = remarks.text or ""
+        return None
 
     def _store_marker(self, ev: str, ev_uid: str):
         t = _TYPE.search(ev)
@@ -139,6 +178,8 @@ class FakeOTS:
         link = _LINK.search(ev)
         if lat.startswith("999") or (float(lat) == 0 and float(lon) == 0):
             self.marker_errors.append(f"{ev_uid}: no point ('NoneType' object is not subscriptable)")
+        elif len(ev_uid) > VARCHAR or len((_CALLSIGN.search(ev) or [None, ""])[1]) > VARCHAR:
+            self.marker_errors.append(f"{ev_uid[:60]}: value too long for type character varying(255)")
         elif link and link.group(1) not in self.euds:
             self.marker_errors.append(f"{ev_uid}: parent_uid {link.group(1)} not in euds")
         else:

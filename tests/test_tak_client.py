@@ -148,3 +148,31 @@ def test_markers_are_stored_by_ots_only_with_position_and_eud_parent(ots):
     assert any("DRONE-NOPOS" in e for e in ots.marker_errors)
     assert any("DRONE-BADLINK" in e and "parent_uid" in e for e in ots.marker_errors)
     tx.stop()
+
+
+def test_ots_fit_cuts_varchar_fields_and_warns_once(caplog):
+    import logging
+
+    from bridge import tak_client as tc
+
+    tc._warned_fields.discard("marker callsign")
+    with caplog.at_level(logging.WARNING, logger="tak_client"):
+        a = ET.fromstring(build_marker("u1", "a-u-G", "C" * 300, 51.15, -1.75))
+        b = ET.fromstring(build_marker("u2", "a-u-G", "&" * 300, 51.15, -1.75))
+    cs = a.find("detail/contact").get("callsign")
+    assert len(cs) == tc.OTS_FIELD_MAX and cs.endswith("…")
+    assert len(b.find("detail/contact").get("callsign")) * 5 <= tc.OTS_FIELD_MAX  # "&amp;" counted
+    assert sum("marker callsign" in r.getMessage() for r in caplog.records) == 1
+    assert tc.ots_fit("short", "x") == "short" and tc.ots_fit(None, "x") is None
+
+
+def test_long_marker_remarks_are_not_cut_and_still_stored(ots):
+    """OTS 1.8.3 doesn't store marker <remarks>, so long remarks are fine as they are."""
+    tx = client(ots, "tx", "TX", sensor_lat=51.15, sensor_lon=-1.75).start()
+    assert tx.wait_registered(3)
+    xml = tx.marker("DRONE-LONG", "a-h-A-M-F-Q", "UAV LONG", 51.151, -1.751, remarks="SIMULATED: " + "r" * 600)
+    assert len(ET.fromstring(xml).find("detail/remarks").text) > 600
+    tx.send(xml)
+    assert until(lambda: "DRONE-LONG" in ots.markers)
+    assert not ots.nacked
+    tx.stop()

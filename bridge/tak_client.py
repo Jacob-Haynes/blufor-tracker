@@ -37,6 +37,13 @@ insert it. From the 1.8.3 source:
 * name from ``<contact callsign>``; optional ``<color argb>``, ``<usericon iconsetpath>``,
   ``<precisionlocation altsrc>``. ``<remarks>`` is relayed but not stored in the markers table.
 
+Field lengths: OTS 1.8.3 stores text in ``varchar(255)`` columns (euds.uid/callsign/device,
+markers.uid/callsign/parent_callsign/iconset_path/location_source, geochat.remarks, ...).
+A longer value fails the insert: for a marker only the stored copy is lost, but for the CoT
+row (uid/type/how) or a GeoChat the event is nacked and **never relayed**. ``ots_fit`` cuts
+such fields to ``OTS_FIELD_MAX`` (250) characters, measured after XML escaping, ending in "…",
+with one warning per field. Marker ``<remarks>`` are not stored, so they are not cut.
+
 Self-contained (stdlib only); the same file is in each kit repo.
 Env: ``TAK_HOST`` (127.0.0.1), ``TAK_PORT`` (8087), ``ISR_HOST``, ``SENSOR_LAT``/``SENSOR_LON``,
 ``TAK_REGISTER_DELAY_S`` (3; tests use less).
@@ -85,9 +92,32 @@ def cot_time(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+OTS_VARCHAR = 255  # OTS 1.8.3 String(255) columns
+OTS_FIELD_MAX = 250  # what we send, with a margin
+_warned_fields: set[str] = set()
+
+
+def ots_fit(value: str | None, field: str, limit: int = OTS_FIELD_MAX) -> str | None:
+    """``value`` cut so it is at most ``limit`` characters both as text and XML-escaped
+    (OTS varchar(255) columns), ending in "…"; warns once per ``field``."""
+    from xml.sax.saxutils import escape
+
+    if value is None or len(escape(value)) <= limit:
+        return value
+    cut = value[:limit]
+    while cut and len(escape(cut.rstrip() + "…")) > limit:
+        cut = cut[:-1]
+    if field not in _warned_fields:
+        _warned_fields.add(field)
+        logger.warning("%s is %d characters, over OTS's varchar(%d): cut to %d (logged once)",
+                       field, len(value), OTS_VARCHAR, limit)
+    return cut.rstrip() + "…"
+
+
 def build_sa(uid: str, callsign: str, device: str, lat: float | None, lon: float | None,
              now: float | None = None, version: str = "5") -> str:
     """The registration SA (contract C5.2)."""
+    uid, callsign, device = ots_fit(uid, "SA uid"), ots_fit(callsign, "SA callsign"), ots_fit(device, "SA device")
     now = time.time() if now is None else now
     t = cot_time(now)
     if lat is not None and lon is not None and (lat or lon):
@@ -119,6 +149,11 @@ def build_marker(uid: str, cot_type: str, callsign: str, lat: float | None, lon:
 
     if lat is None or lon is None or (lat == 0 and lon == 0):
         return None
+    uid, callsign = ots_fit(uid, "marker uid"), ots_fit(callsign, "marker callsign")
+    parent_uid, parent_callsign = ots_fit(parent_uid, "marker parent_uid"), ots_fit(parent_callsign,
+                                                                                   "marker parent_callsign")
+    iconsetpath = ots_fit(iconsetpath, "marker iconsetpath")
+    location_source = ots_fit(location_source, "marker location_source")
     now = time.time() if now is None else now
     t = cot_time(now)
     detail = [f"<contact callsign={quoteattr(callsign)}/>"]
