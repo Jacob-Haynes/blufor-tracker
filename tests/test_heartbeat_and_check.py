@@ -10,6 +10,7 @@ def test_heartbeat_payload_contract():
     assert p["tool"] == "blufor-tracker" and p["ts"] == 100 and "." not in p["host"]
     assert heartbeat.build_payload("x", "", "bogus", "weird")["mode"] == "cpu"
     assert heartbeat.build_payload("x", "", "simulate", "weird")["status"] == "error"
+    assert heartbeat.build_payload("x", "", "llm", "ok")["mode"] == "llm"
 
 
 def test_default_url_uses_dot_local(monkeypatch):

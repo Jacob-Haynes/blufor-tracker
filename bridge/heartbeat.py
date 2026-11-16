@@ -3,7 +3,7 @@
 Payload (kit contract)::
 
     {"tool": "<repo-name>", "host": "<short hostname>", "url": "http://<host>.local:<port>/",
-     "mode": "cpu|cuda|mps|gemini|vlm|simulate|replay", "status": "ok|degraded|error|stopped",
+     "mode": "cpu|cuda|mps|gemini|llm|vlm|simulate|replay", "status": "ok|degraded|error|stopped",
      "ts": <unix seconds>, "detail": "<optional human text>"}
 
 The launcher on the Pi reads these. ``detail`` is an optional extra. On a clean exit
@@ -30,7 +30,7 @@ logger = logging.getLogger("heartbeat")
 
 TOPIC_FMT = "isrkit/heartbeat/{tool}"
 INTERVAL_S = 10
-MODES = ("cpu", "cuda", "mps", "gemini", "vlm", "simulate", "replay")
+MODES = ("cpu", "cuda", "mps", "gemini", "llm", "vlm", "simulate", "replay")
 STATUSES = ("ok", "degraded", "error", "stopped")
 
 
