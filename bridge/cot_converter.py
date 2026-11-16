@@ -76,6 +76,9 @@ def parse_cot_event(xml_str: str) -> dict | None:
         if chat is not None:
             result["chatroom"] = chat.get("chatroom", "")
             result["sender_callsign"] = chat.get("senderCallsign", "")
+            grp = chat.find("chatgrp")
+            if grp is not None and grp.get("uid0"):
+                result["chat_sender_uid"] = grp.get("uid0")
 
         emergency = detail.find("emergency")
         if emergency is not None:

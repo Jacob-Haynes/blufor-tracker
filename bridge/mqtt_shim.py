@@ -62,6 +62,41 @@ _DEFAULT_KEY = bytearray([
 ])
 
 
+DATA_PAYLOAD_LEN = mesh_pb2.Constants.DATA_PAYLOAD_LEN  # 233: largest Meshtastic payload
+KIT_UID_PREFIX = "isrkit-"  # kit tools' TAK registrations (contract v5)
+
+
+def is_kit_uid(uid: str) -> bool:
+    uid = uid or ""
+    if uid.startswith("GeoChat."):  # GeoChat.<sender uid>.<room>.<id>
+        uid = uid[len("GeoChat."):]
+    return uid.startswith(KIT_UID_PREFIX)
+
+
+def fit_chat(tak, message: str, limit: int = DATA_PAYLOAD_LEN) -> tuple[bytes, bool]:
+    """Set ``tak.chat.message`` so the serialized TAKPacket fits one LoRa packet.
+    Returns (payload, truncated); a cut message ends in "…"."""
+    tak.chat.message = message
+    raw = tak.SerializeToString()
+    if len(raw) <= limit:
+        return raw, False
+    lo, hi, best = 0, len(message), None
+    while lo <= hi:  # longest prefix that fits with the ellipsis
+        mid = (lo + hi) // 2
+        tak.chat.message = message[:mid].rstrip() + "…"
+        candidate = tak.SerializeToString()
+        if len(candidate) <= limit:
+            best, lo = candidate, mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        tak.chat.message = "…"
+        best = tak.SerializeToString()
+    else:
+        tak.chat.message = message[:hi].rstrip() + "…"
+    return best, True
+
+
 class MqttShim:
     def __init__(self, port: str, mqtt_host: str = "127.0.0.1", mqtt_port: int = 1883,
                  mqtt_user: str = "guest", mqtt_pass: str = "guest"):
@@ -78,6 +113,7 @@ class MqttShim:
         self._channel_key: bytes | None = None
         self._running = False
         self._atak_nodes: set[int] = set()  # nodes that send ATAK_PLUGIN (dedup TEXT_MESSAGE_APP)
+        self._warned_long_chat = False
         self._uplinked_texts: dict[str, float] = {}  # text → timestamp (firehose echo prevention)
         self._my_node_num: int | None = None
         # The radio is shared by the self-SA, firehose, MQTT downlink and meshbus
@@ -551,6 +587,13 @@ class MqttShim:
             # Clean old entries
             self._uplinked_texts = {k: v for k, v in self._uplinked_texts.items() if now - v < 60}
 
+            # Kit tools (tac-advisor's replies, ...) answer mesh users themselves over meshbus:
+            # relaying their GeoChat to LoRa only wastes airtime and duplicates.
+            chat_uid = parsed.get("chat_sender_uid", "")
+            if is_kit_uid(chat_uid) or is_kit_uid(sender_uid) or is_kit_uid(parsed.get("uid", "")):
+                logger.debug("Firehose: not relaying kit-tool GeoChat from %s", chat_uid or sender_uid)
+                return
+
             sender = parsed.get("sender_callsign", parsed.get("callsign", "TAK"))
 
             # Build TAKPacket GeoChat for ATAK on mesh (uncompressed only —
@@ -558,10 +601,13 @@ class MqttShim:
             tak = atak_pb2.TAKPacket()
             tak.contact.callsign = sender
             tak.contact.device_callsign = sender_uid or f"TAK-{sender}"
-            tak.chat.message = remarks
             tak.chat.to = "All Chat Rooms"
-
-            raw = tak.SerializeToString()
+            raw, truncated = fit_chat(tak, remarks)
+            if truncated and not self._warned_long_chat:
+                logger.warning("Firehose: GeoChat from %s is %d bytes, over the %d-byte LoRa payload: "
+                               "sent truncated ending in '…' (logged once)", sender,
+                               len(remarks.encode()), DATA_PAYLOAD_LEN)
+                self._warned_long_chat = True
             self._send_data(raw, portnums_pb2.PortNum.Value("ATAK_PLUGIN"))
             logger.info("Firehose→Serial: GeoChat from %s (%d bytes): %s",
                         sender, len(raw), remarks[:80])
