@@ -74,19 +74,21 @@ def test_build_rx_skips_own_node():
     assert meshbus.build_rx(packet, my_node_num=42) is None
 
 
-def test_gateway_per_source_rate_limit():
+def test_gateway_per_source_token_bucket():
     clock = FakeClock()
     sent = []
-    gw = meshbus.MeshbusGateway(lambda *a: sent.append(a), clock=clock, global_interval=0)
-    assert gw.submit(_tx(source="a"))
-    assert not gw.submit(_tx(source="a"))  # too soon
+    gw = meshbus.MeshbusGateway(lambda *a: sent.append(a), clock=clock, global_interval=0, max_queue=50)
+    for _ in range(meshbus.PER_SOURCE_BURST):
+        assert gw.submit(_tx(source="a"))  # burst allowed
+    assert not gw.submit(_tx(source="a"))  # bucket empty
     assert gw.submit(_tx(source="b"))  # other source unaffected
-    clock.t += meshbus.PER_SOURCE_INTERVAL + 0.1
+    clock.t += meshbus.PER_SOURCE_INTERVAL + 0.1  # one token back
     assert gw.submit(_tx(source="a"))
+    assert not gw.submit(_tx(source="a"))
     while gw.send_next(timeout=0):
         pass
-    assert len(sent) == 3
-    assert gw.stats["rate_limited"] == 1
+    assert len(sent) == meshbus.PER_SOURCE_BURST + 2
+    assert gw.stats["rate_limited"] == 2
 
 
 def test_gateway_drops_oldest_when_full():

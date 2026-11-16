@@ -260,7 +260,7 @@ Only one process can open the Meshtastic serial port, and that is the bridge. Ot
 | `meshbus/rx` | radio → tools | `{"from": "!nodeid", "text": "...", "channel": 0, "ts": <epoch>, "from_short": "A1", "from_long": "Alpha 1"}` |
 
 - Every inbound text message is published to `meshbus/rx`, including texts from ATAK nodes. `from_short`/`from_long` are added when the radio knows the sender's names, so treat them as optional.
-- Transmit is limited because LoRa airtime is scarce. Text over 200 characters is truncated. Each `source` can send one message every 3 s, sends are spaced at least 1 s apart, and at most 20 are queued (oldest dropped). Invalid or rate-limited requests are logged and dropped. Every send is logged with its `source`.
+- Transmit is limited because LoRa airtime is scarce. Text over 200 characters is truncated. Each `source` can send a burst of 5 messages, then one every 3 s (token bucket). Sends are spaced at least 1 s apart, and at most 20 are queued (oldest dropped). Invalid or rate-limited requests are logged and dropped. Every send is logged with its `source`.
 - Try it from the Pi: `mosquitto_pub -h 127.0.0.1 -u guest -P guest -t meshbus/tx -m '{"text":"radio check","source":"me"}'`
 
 ## Updating the Bridge

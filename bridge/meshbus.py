@@ -17,9 +17,10 @@ on the local broker (OpenTAKServer's RabbitMQ, 127.0.0.1:1883, guest/guest):
 the sender's node names. They are optional, so consumers must fall back to ``from``.
 
 LoRa airtime is scarce, so transmit is limited here rather than trusting every
-tool: text is truncated to ``MAX_TEXT_LEN``, each source may send at most one
-message per ``PER_SOURCE_INTERVAL`` seconds, all sends are spaced by
-``GLOBAL_INTERVAL`` and the queue is bounded (oldest dropped first).
+tool: text is truncated to ``MAX_TEXT_LEN``, each source gets a token bucket of
+``PER_SOURCE_BURST`` messages refilled at one per ``PER_SOURCE_INTERVAL``
+seconds, all sends are spaced by ``GLOBAL_INTERVAL`` and the queue is bounded
+(oldest dropped first).
 """
 
 from __future__ import annotations
@@ -39,7 +40,8 @@ TOPIC_TX = "meshbus/tx"
 TOPIC_RX = "meshbus/rx"
 
 MAX_TEXT_LEN = 200
-PER_SOURCE_INTERVAL = 3.0
+PER_SOURCE_INTERVAL = 3.0  # seconds per token refill
+PER_SOURCE_BURST = 5  # messages a source may send back-to-back
 GLOBAL_INTERVAL = 1.0
 MAX_QUEUE = 20
 MAX_CHANNEL = 7
@@ -135,16 +137,18 @@ class MeshbusGateway:
         send_text: Callable[[str, str | None, int], None],
         *,
         per_source_interval: float = PER_SOURCE_INTERVAL,
+        per_source_burst: int = PER_SOURCE_BURST,
         global_interval: float = GLOBAL_INTERVAL,
         max_queue: int = MAX_QUEUE,
         clock: Callable[[], float] = time.monotonic,
     ):
         self._send_text = send_text
         self._per_source_interval = per_source_interval
+        self._per_source_burst = per_source_burst
         self._global_interval = global_interval
         self._clock = clock
         self._queue: queue.Queue[TxRequest] = queue.Queue(maxsize=max_queue)
-        self._last_by_source: dict[str, float] = {}
+        self._buckets: dict[str, tuple[float, float]] = {}  # source -> (tokens, last refill time)
         self._last_send = float("-inf")
         self._lock = threading.Lock()
         self._running = False
@@ -161,12 +165,18 @@ class MeshbusGateway:
 
         now = self._clock()
         with self._lock:
-            last = self._last_by_source.get(req.source)
-            if last is not None and now - last < self._per_source_interval:
+            tokens, last = self._buckets.get(req.source, (float(self._per_source_burst), now))
+            if self._per_source_interval > 0:
+                tokens = min(float(self._per_source_burst), tokens + (now - last) / self._per_source_interval)
+            else:
+                tokens = float(self._per_source_burst)
+            if tokens < 1:
+                self._buckets[req.source] = (tokens, now)
                 self.stats["rate_limited"] += 1
-                logger.warning("meshbus/tx rate-limited source=%s (%.1fs since last)", req.source, now - last)
+                logger.warning("meshbus/tx rate-limited source=%s (burst of %d used up)", req.source,
+                               self._per_source_burst)
                 return False
-            self._last_by_source[req.source] = now
+            self._buckets[req.source] = (tokens - 1, now)
 
         while True:
             try:
