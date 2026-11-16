@@ -461,7 +461,9 @@ python -m bridge.mqtt_shim --simulate
 
 Serves meshbus with no radio and no OTS. It needs only an MQTT broker (e.g. `mosquitto`). It publishes fake mesh texts (`ADVISOR: sitrep`, `DROP ...`, `PICKUP`) on `meshbus/rx` and logs, rather than transmits, everything sent to `meshbus/tx`. Use it to exercise tac-advisor and mesh-deadrop on a laptop.
 
-`python -m bridge --simulate` still runs the legacy `mesh_bridge.py` simulator, which sends fake CoT straight to a TAK server (`TAK_HOST`/`TAK_PORT`, default `127.0.0.1:8087`). The fake units move around the shared OP position (`SENSOR_LAT`/`SENSOR_LON`, default 51.15,-1.75), each updates at most every 5 s, and every CoT remark starts `SIMULATED: ` so ATAK users and tac-advisor's SITREP can tell it is not live.
+`python -m bridge --simulate` runs `bridge/bft_sim.py`: simulated BFT units on ATAK with no radio, the contract-v5 way. It registers once as `isrkit-blufor-tracker-<ISR_HOST>` (callsign `BFT-SIM <ISR_HOST>`) through `bridge/tak_client.py`. It then sends five units as plain markers (`SIM-BFT-Alpha1` …, callsigns `SIM-Alpha1` …), not as devices, so they can't collide with a real ATAK user's callsign, and OTS stores them on its web map. The units move around the shared OP position (`SENSOR_LAT`/`SENSOR_LON`, default 51.15,-1.75), each updates at most every 5 s, and every remark starts `SIMULATED: `. `TAK_HOST`/`TAK_PORT` (default `127.0.0.1:8087`) or `--tak-host`/`--tak-port` choose the server.
+
+`mesh_bridge.py` (pytak) is **legacy and dev-only**. It isn't contract v5: OTS drops its opening `t-x-d-d`, and its connection registers as its first unit. It's in no profile and runs only with `python -m bridge --legacy`. Production is `bridge.mqtt_shim`.
 
 ### Run mqtt_shim Locally
 
@@ -490,9 +492,11 @@ bridge/
   check.py            # demo-day self-check: TAK send/receive, MQTT, heartbeats
   channel_url.py      # writes the channel URL (PSK!) for the launcher's onboarding QR
   cot_converter.py    # CoT XML <-> Meshtastic packet conversion
-  mesh_bridge.py      # legacy: direct PyTAK TCP bridge with simulation mode
+  bft_sim.py          # `python -m bridge --simulate`: simulated BFT units via tak_client
+  tak_client.py       # registered OTS client (contract v5), same file in every kit repo
+  mesh_bridge.py      # LEGACY dev-only PyTAK TCP bridge (`python -m bridge --legacy`)
   upstream_relay.py   # optional upstream TAK server relay (used by mesh_bridge)
-  __main__.py         # `python -m bridge` entry point (legacy/simulation)
+  __main__.py         # `python -m bridge` entry point (--simulate / --legacy)
 deploy/
   install.sh          # Pi installer (OTS + bridge + hotspot + patch)
   start.sh            # manual launcher (reads /etc/blufor-tracker.env)

@@ -1,6 +1,10 @@
-"""Bidirectional Meshtastic ↔ TAK Server CoT bridge."""
+"""LEGACY, dev-only: direct pytak TCP bridge. Not contract v5 and in no profile; production is
+``bridge.mqtt_shim``, simulated units are ``bridge.bft_sim``. Run only with ``--legacy``.
+
+Bidirectional Meshtastic ↔ TAK Server CoT bridge."""
 
 import argparse
+import sys
 import asyncio
 import logging
 import os
@@ -458,7 +462,10 @@ def parse_args():
     parser.add_argument("--tak-host", default=os.environ.get("TAK_HOST", "127.0.0.1"), help="TAK server host")
     parser.add_argument("--tak-port", type=int, default=int(os.environ.get("TAK_PORT", "8087")),
                         help="TAK server CoT streaming TCP port (OTS on this Pi: 8087)")
-    parser.add_argument("--simulate", action="store_true", help="Simulate mesh traffic (no hardware)")
+    parser.add_argument("--simulate", action="store_true",
+                        help="Legacy pytak simulator; use `python -m bridge --simulate` (bft_sim) instead")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Acknowledge this is the LEGACY dev-only pytak bridge (not contract v5)")
 
     upstream = parser.add_argument_group("upstream TAK server (optional)")
     upstream.add_argument("--upstream-host", default=None, help="Remote TAK server host (enables upstream relay)")
@@ -478,6 +485,15 @@ def main():
     )
 
     args = parse_args()
+    if not args.legacy:
+        print("mesh_bridge.py is the LEGACY dev-only pytak bridge. It does not register with OTS the\n"
+              "contract-v5 way: OTS drops its opening t-x-d-d, and the connection registers as its first\n"
+              "unit (no takv), which can collide with a real ATAK callsign. It is in no profile.\n"
+              "  production:      python -m bridge.mqtt_shim   (mesh-bridge.service)\n"
+              "  simulated units: python -m bridge --simulate  (bridge.bft_sim)\n"
+              "  this, anyway:    python -m bridge --legacy [--simulate]", file=sys.stderr)
+        sys.exit(2)
+    logger.warning("LEGACY dev-only pytak bridge (not contract v5); see python -m bridge --simulate")
     bridge = MeshBridge(
         port=args.port,
         tak_host=args.tak_host,
