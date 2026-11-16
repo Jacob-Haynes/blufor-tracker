@@ -40,13 +40,38 @@ def _event(uid: str, callsign: str, cot_type: str = "a-f-G-U-C", extra: str = ""
             f'le="9999999"/><detail><contact callsign={quoteattr(callsign)}/>{extra}</detail></event>')
 
 
+OTS_DEFAULT_TCP_PORT = 8088  # OTS's own default OTS_TCP_STREAMING_PORT
+
+
+def _listening(host: str, port: int) -> bool:
+    try:
+        socket.create_connection((host, port), timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def explain_no_listener(host: str, port: int, error: OSError) -> str:
+    """Why the TAK port is closed, naming the OTS-on-8088 case (real-Pi bug BT-2)."""
+    if port != OTS_DEFAULT_TCP_PORT and _listening(host, OTS_DEFAULT_TCP_PORT):
+        return (f"nothing listening on TAK_PORT {port}, OTS may be on {OTS_DEFAULT_TCP_PORT} "
+                f"(its default). Set OTS_TCP_STREAMING_PORT: {port} in ~/ots/config.yml "
+                f"(sudo bash deploy/install.sh does it) and restart OTS")
+    return (f"nothing listening on TAK_PORT {port} at {host} ({error}); "
+            f"nothing on {OTS_DEFAULT_TCP_PORT} either. Is opentakserver running?")
+
+
 def check_tak(host: str, port: int, timeout: float = 8.0) -> tuple[bool, str]:
     tag = uuid.uuid4().hex[:8]
     try:
         a = socket.create_connection((host, port), timeout=5)
+    except OSError as e:
+        return False, explain_no_listener(host, port, e)
+    try:
         b = socket.create_connection((host, port), timeout=5)
     except OSError as e:
-        return False, f"cannot connect to {host}:{port} ({e}) — is opentakserver running and on this port?"
+        a.close()
+        return False, f"cannot open a second connection to {host}:{port} ({e})"
     try:
         a.sendall(_event(f"ISR-CHECK-RX-{tag}", f"ISR-CHECK-RX-{tag}",
                          extra='<takv platform="isr-check" device="pi" os="linux" version="1"/>').encode())

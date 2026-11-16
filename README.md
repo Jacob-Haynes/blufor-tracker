@@ -77,6 +77,8 @@ Step 4 of the install runs the upstream OpenTAKServer Pi installer (`https://i.o
 - **Earlier OTS install.** If PostgreSQL already has an `ots` role, the installer asks for its password. Pass it as `OTS_PG_PASSWORD=... sudo -E bash deploy/install.sh`; otherwise the install stops before running anything.
 - If any of this fails, the error message gives the command to run step 4 by hand in a terminal.
 
+**OTS CoT port 8087.** OTS's own default plain-TCP CoT port is 8088; every kit tool sends to 8087. Every install run (also when OTS was already installed, e.g. by hand) runs `deploy/ots_port.sh`. It sets `OTS_TCP_STREAMING_PORT: 8087` in `~/ots/config.yml` and keeps a timestamped `config.yml.bak-…` when it changes anything. It restarts the running OTS units only when the value changed, and prints what it did. To fix a Pi by hand: `bash deploy/ots_port.sh ~/ots/config.yml 8087`, then restart OTS. `python -m bridge.check` reports "nothing listening on TAK_PORT 8087, OTS may be on 8088" when that is the problem.
+
 **The OTS installer runs `apt upgrade -y`**, which can install a new kernel (it has done on a test Pi), so a reboot is needed afterwards. The install says "REBOOT NEEDED" at the end. It also enables the OTS services at boot.
 
 **Do not reboot yet**: configure the radios first (Step 2), then reboot as that step says.

@@ -85,4 +85,4 @@ def test_check_tak_fails_cleanly_when_nothing_listens():
     port = s.getsockname()[1]
     s.close()
     ok, msg = check.check_tak("127.0.0.1", port, timeout=1)
-    assert not ok and "cannot connect" in msg
+    assert not ok and "nothing listening on TAK_PORT" in msg

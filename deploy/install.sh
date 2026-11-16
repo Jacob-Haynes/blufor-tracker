@@ -82,35 +82,26 @@ else
     # aborts on a runaway/stalled run (see the script header).
     OTS_USER="$USER" bash "$SCRIPT_DIR/ots_install.sh"
     OTS_JUST_INSTALLED=1
+fi
 
-    # Configure OTS to listen on port 8087 (standard TAK port)
-    OTS_CONFIG="$USER_HOME/ots/config.yml"
-    if [ -f "$OTS_CONFIG" ]; then
-        echo "Configuring OpenTAKServer TCP port to 8087..."
-        if grep -q "OTS_TCP_STREAMING_PORT" "$OTS_CONFIG"; then
-            sed -i 's/OTS_TCP_STREAMING_PORT:.*/OTS_TCP_STREAMING_PORT: 8087/' "$OTS_CONFIG"
-        else
-            echo "OTS_TCP_STREAMING_PORT: 8087" >> "$OTS_CONFIG"
+# OTS CoT port: ALWAYS check it, also when OTS was already installed (real-Pi bug BT-2:
+# OTS installed by hand stayed on its default 8088 and every kit tool's CoT to 8087 went nowhere).
+OTS_CONFIG="$USER_HOME/ots/config.yml"
+set +e
+sudo -u "$USER" bash "$SCRIPT_DIR/ots_port.sh" "$OTS_CONFIG" 8087
+port_rc=$?
+set -e
+if [ "$port_rc" = 2 ]; then
+    restarted=""
+    for unit in opentakserver eud_handler eud_handler_ssl cot_parser; do
+        # restart only what is running: pi-profiles decides what is started
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            systemctl restart "$unit" && restarted="$restarted $unit"
         fi
-    else
-        echo "Starting OpenTAKServer to generate config..."
-        systemctl start opentakserver || true
-        sleep 5
-        systemctl stop opentakserver || true
-        if [ -f "$OTS_CONFIG" ]; then
-            if grep -q "OTS_TCP_STREAMING_PORT" "$OTS_CONFIG"; then
-                sed -i 's/OTS_TCP_STREAMING_PORT:.*/OTS_TCP_STREAMING_PORT: 8087/' "$OTS_CONFIG"
-            else
-                echo "OTS_TCP_STREAMING_PORT: 8087" >> "$OTS_CONFIG"
-            fi
-        else
-            mkdir -p "$USER_HOME/ots"
-            cat > "$OTS_CONFIG" <<OTSEOF
-OTS_TCP_STREAMING_PORT: 8087
-OTSEOF
-            chown "$USER:$USER" "$OTS_CONFIG"
-        fi
-    fi
+    done
+    echo "OTS CoT port changed to 8087; restarted:${restarted:- nothing (OTS not running, picks it up on next start)}"
+elif [ "$port_rc" = 1 ]; then
+    echo "WARNING: OTS CoT port not set (see above). Kit tools send CoT to 8087."
 fi
 
 # 5. OTS patch: fix device_callsign |UUID suffix causing KeyError
