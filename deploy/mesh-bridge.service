@@ -1,13 +1,17 @@
 [Unit]
-Description=Meshtastic TAK Bridge
+Description=Meshtastic TAK Bridge (blufor-tracker mqtt_shim + meshbus)
 After=network.target opentakserver.service
 Wants=opentakserver.service
+# Never give up restarting: the radio may be plugged in late during a demo.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=jhh-pi
 WorkingDirectory=/opt/blufor-tracker
-ExecStart=/opt/blufor-tracker/.venv/bin/python -m bridge.mqtt_shim --port /dev/ttyUSB0
+EnvironmentFile=-/etc/blufor-tracker.env
+# --port defaults to MESH_PORT from the env file, or "auto" (probe /dev/ttyUSB*, /dev/ttyACM*)
+ExecStart=/opt/blufor-tracker/.venv/bin/python -m bridge.mqtt_shim
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

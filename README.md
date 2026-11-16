@@ -59,13 +59,13 @@ sudo bash deploy/install.sh
 This takes 10-20 minutes and installs:
 - OpenTAKServer (TAK server with PostgreSQL database)
 - The mesh bridge service
-- WiFi hotspot: **BFT-TAK** (password: `change-me-hotspot`)
+- WiFi hotspot: **BFT-TAK** with a generated password, saved in `/etc/blufor-tracker.env` and printed at the end of the install (`sudo grep HOTSPOT_PASS /etc/blufor-tracker.env`)
 - All Python dependencies
 - The OTS device_callsign patch (fixes a known bug)
 
-To use a different hotspot name or password:
+To choose the hotspot name or password (at least 8 characters), pass them in or edit `/etc/blufor-tracker.env` and re-run the install. Re-running is safe:
 ```bash
-HOTSPOT_SSID="MyTAK" HOTSPOT_PASS="mypassword" sudo -E bash deploy/install.sh
+sudo HOTSPOT_SSID="MyTAK" HOTSPOT_PASS="a-long-passphrase" bash deploy/install.sh
 ```
 
 **Do not reboot yet** — configure the radios first (Step 2).
@@ -127,21 +127,23 @@ These settings apply to **all radios** (bridge and field). Set via the Meshtasti
 | Hop limit | 3 (default) | How many times a packet can be relayed across the mesh |
 | Smart position broadcast | Enabled | Only broadcasts position when moving — saves airtime |
 
-### Now Reboot the Pi
+### Now Reboot and Start the Profile
 
 ```bash
 sudo reboot
+# after it comes back:
+sudo pi-profiles blufor-tracker      # or: sudo systemctl start mesh-bridge
 ```
 
-After reboot, both services start automatically:
+The install does not enable `mesh-bridge` at boot. [pi-profiles](https://github.com/Jacob-Haynes/pi-profiles) starts it with the active profile. The profile runs:
 - **opentakserver** — the TAK server (takes ~30 seconds to start)
-- **mesh-bridge** — the Meshtastic bridge (starts after OTS)
+- **mesh-bridge** — the Meshtastic bridge (starts after OTS). If the radio is not plugged in yet it waits for it, and if the radio is unplugged it restarts and waits again.
 
-The WiFi hotspot (`BFT-TAK`) will be available within 1-2 minutes.
+The WiFi hotspot (`BFT-TAK`) comes up on boot by itself, within 1-2 minutes.
 
 ## Step 3: Set Up OpenTAKServer
 
-Connect to the Pi's WiFi hotspot (`BFT-TAK`, password `change-me-hotspot`) and open a browser.
+Connect to the Pi's WiFi hotspot (`BFT-TAK`, password from `/etc/blufor-tracker.env`) and open a browser.
 
 1. Browse to **http://192.168.4.1**
 2. **Create an account** — OTS will prompt you to register on first visit. This becomes the admin account.
@@ -167,7 +169,7 @@ No radio needed. Connect directly to the Pi's TAK server over WiFi.
 1. Install [ATAK-CIV](https://tak.gov/products/atak-civ) on your Android device
 
 **Connect:**
-1. Connect to WiFi: **BFT-TAK** (password: `change-me-hotspot`)
+1. Connect to WiFi: **BFT-TAK** (the hotspot password from install)
 2. Open ATAK
 3. Tap the three-dot menu → **Settings** → **Network Preferences** → **TAK Server connections** → **Add**
 4. Enter:
@@ -247,6 +249,19 @@ sed -i '/uid = unishox2.decompress(pb.contact.device_callsign/a\            uid 
 sudo systemctl restart opentakserver
 ```
 See `deploy/ots_patches/meshtastic_device_callsign.patch` for details on what this fixes.
+
+## meshbus: Sharing the Radio With Other Tools
+
+Only one process can open the Meshtastic serial port, and that is the bridge. Other tools on the Pi (tac-advisor, mesh-deadrop, the sensor tools) use the radio through the local MQTT broker (OpenTAKServer's RabbitMQ, `127.0.0.1:1883`, `guest`/`guest`):
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `meshbus/tx` | tool → radio | `{"text": "...", "to": null \| "!nodeid", "channel": 0, "source": "<tool>"}` |
+| `meshbus/rx` | radio → tools | `{"from": "!nodeid", "text": "...", "channel": 0, "ts": <epoch>, "from_short": "A1", "from_long": "Alpha 1"}` |
+
+- Every inbound text message is published to `meshbus/rx`, including texts from ATAK nodes. `from_short`/`from_long` are added when the radio knows the sender's names, so treat them as optional.
+- Transmit is limited because LoRa airtime is scarce. Text over 200 characters is truncated. Each `source` can send one message every 3 s, sends are spaced at least 1 s apart, and at most 20 are queued (oldest dropped). Invalid or rate-limited requests are logged and dropped. Every send is logged with its `source`.
+- Try it from the Pi: `mosquitto_pub -h 127.0.0.1 -u guest -P guest -t meshbus/tx -m '{"text":"radio check","source":"me"}'`
 
 ## Updating the Bridge
 
@@ -384,33 +399,45 @@ journalctl -u opentakserver -f          # live OTS logs
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python -m bridge --simulate
+python -m bridge.mqtt_shim --simulate
 ```
 
-Generates fake mesh traffic at Salisbury Plain coordinates for testing CoT conversion without hardware. Uses the legacy `mesh_bridge.py` — the production entry point is `mqtt_shim.py`.
+Serves meshbus with no radio and no OTS. It needs only an MQTT broker (e.g. `mosquitto`). It publishes fake mesh texts (`ADVISOR: sitrep`, `DROP ...`, `PICKUP`) on `meshbus/rx` and logs, rather than transmits, everything sent to `meshbus/tx`. Use it to exercise tac-advisor and mesh-deadrop on a laptop.
+
+`python -m bridge --simulate` still runs the legacy `mesh_bridge.py` simulator, which sends fake CoT straight to a TAK server (`TAK_HOST`/`TAK_PORT`, default `127.0.0.1:8087`).
 
 ### Run mqtt_shim Locally
 
 ```bash
 source .venv/bin/activate
+python -m bridge.mqtt_shim                 # auto-detects /dev/ttyUSB*, /dev/ttyACM*
 python -m bridge.mqtt_shim --port /dev/ttyUSB0
 ```
 
-Requires a Meshtastic radio on USB and RabbitMQ running locally.
+Requires a Meshtastic radio on USB and RabbitMQ running locally. Settings can also come from `/etc/blufor-tracker.env` (see `deploy/blufor-tracker.env.example`).
+
+### Tests
+
+```bash
+pip install pytest
+python -m pytest
+```
 
 ## Project Structure
 
 ```
 bridge/
-  mqtt_shim.py        # production entry point: serial <-> MQTT bridge with firehose + self-SA
+  mqtt_shim.py        # production entry point: serial <-> MQTT bridge with firehose + self-SA + meshbus
+  meshbus.py          # meshbus/tx + meshbus/rx: lets other tools share the radio
   cot_converter.py    # CoT XML <-> Meshtastic packet conversion
   mesh_bridge.py      # legacy: direct PyTAK TCP bridge with simulation mode
   upstream_relay.py   # optional upstream TAK server relay (used by mesh_bridge)
   __main__.py         # `python -m bridge` entry point (legacy/simulation)
 deploy/
   install.sh          # Pi installer (OTS + bridge + hotspot + patch)
-  start.sh            # manual launcher with serial port auto-detection
-  mesh-bridge.service # systemd unit
+  start.sh            # manual launcher (reads /etc/blufor-tracker.env)
+  mesh-bridge.service # systemd unit (restarts forever, waits for the radio)
+  blufor-tracker.env.example  # template for /etc/blufor-tracker.env (hotspot password, MQTT, radio)
   ots_patches/        # patches for known OTS bugs
   fix_firehose.py     # diagnostic: manual firehose queue binding (not needed on Python 3.12)
   remote/             # WireGuard relay scripts for internet access
@@ -419,6 +446,9 @@ deploy/
     add-peer.sh       #   add Pi as WireGuard peer
     pi-tunnel.sh      #   configure WireGuard tunnel on Pi
     enable-tls.sh     #   verify OTS SSL and guide cert setup
+profiles.d/
+  blufor-tracker.conf # pi-profiles standalone profile (opentakserver + mesh-bridge)
+tests/                # pytest (no hardware needed)
 ```
 
 ## Related Projects
