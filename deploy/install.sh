@@ -49,8 +49,10 @@ apt-get install -y -qq python3 python3-venv python3-pip git curl
 # 2. Copy project files
 echo "[2/7] Copying project to $APP_DIR..."
 mkdir -p "$APP_DIR" "$DATA_DIR"
-rm -rf "$APP_DIR/bridge"
-cp -r "$REPO_DIR/bridge" "$REPO_DIR/requirements.txt" "$REPO_DIR/deploy" "$REPO_DIR/profiles.d" "$APP_DIR/"
+if [ "$REPO_DIR" != "$APP_DIR" ]; then
+    rm -rf "$APP_DIR/bridge"
+    cp -r "$REPO_DIR/bridge" "$REPO_DIR/requirements.txt" "$REPO_DIR/deploy" "$REPO_DIR/profiles.d" "$APP_DIR/"
+fi
 chown -R "$USER:$USER" "$APP_DIR" "$DATA_DIR"
 
 # 3. Bridge venv + deps
