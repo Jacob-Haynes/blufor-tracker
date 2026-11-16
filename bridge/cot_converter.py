@@ -573,3 +573,20 @@ class CotStreamParser:
 
 def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+SIM_REMARKS = "SIMULATED: "
+
+
+def label_simulated(cot_xml: str, note: str = "simulated BFT position") -> str:
+    """Contract C4.3: CoT made in --simulate carries remarks starting "SIMULATED: ".
+
+    Prefixes existing remarks (chat text) or adds a <remarks> element to the detail."""
+    if "<remarks" in cot_xml:
+        import re
+
+        return re.sub(r"(<remarks[^>]*>)(?!SIMULATED: )", lambda m: m.group(1) + SIM_REMARKS, cot_xml, count=1)
+    if "</detail>" in cot_xml:
+        return cot_xml.replace("</detail>", f"<remarks>{SIM_REMARKS}{note}</remarks></detail>", 1)
+    return cot_xml
+

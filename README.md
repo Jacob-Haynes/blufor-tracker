@@ -298,7 +298,8 @@ Then it lists every tool's retained heartbeat with status and age. It exits non-
 The bridge publishes a retained JSON message to `isrkit/heartbeat/blufor-tracker` every 10 s:
 - `status`: `ok`, or `degraded` while it waits for the radio or the OTS broker is down;
 - `mode`: `cpu`, or `simulate`;
-- `url`: the OTS web UI.
+- `url`: the OTS web UI;
+- `host`: `ISR_HOST` if set, else the lowercased short hostname.
 
 It publishes `stopped` on a clean stop. If it dies, the broker publishes `error`. `HEARTBEAT=0` turns it off.
 
@@ -447,7 +448,7 @@ python -m bridge.mqtt_shim --simulate
 
 Serves meshbus with no radio and no OTS. It needs only an MQTT broker (e.g. `mosquitto`). It publishes fake mesh texts (`ADVISOR: sitrep`, `DROP ...`, `PICKUP`) on `meshbus/rx` and logs, rather than transmits, everything sent to `meshbus/tx`. Use it to exercise tac-advisor and mesh-deadrop on a laptop.
 
-`python -m bridge --simulate` still runs the legacy `mesh_bridge.py` simulator, which sends fake CoT straight to a TAK server (`TAK_HOST`/`TAK_PORT`, default `127.0.0.1:8087`).
+`python -m bridge --simulate` still runs the legacy `mesh_bridge.py` simulator, which sends fake CoT straight to a TAK server (`TAK_HOST`/`TAK_PORT`, default `127.0.0.1:8087`). The fake units move around the shared OP position (`SENSOR_LAT`/`SENSOR_LON`, default 51.15,-1.75), each updates at most every 5 s, and every CoT remark starts `SIMULATED: ` so ATAK users and tac-advisor's SITREP can tell it is not live.
 
 ### Run mqtt_shim Locally
 

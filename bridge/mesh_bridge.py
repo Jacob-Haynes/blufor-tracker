@@ -15,6 +15,7 @@ from pubsub import pub
 from bridge.cot_converter import (
     UID_PREFIX,
     cot_xml_to_meshtastic,
+    label_simulated,
     meshtastic_to_cot_xml,
 )
 
@@ -354,9 +355,14 @@ class MeshBridge:
     # ── Simulator ─────────────────────────────────────────────────────
 
     def _simulator_loop(self):
-        """Generate fake Meshtastic packets for testing without hardware."""
+        """Generate fake Meshtastic packets for testing without hardware.
+
+        Units drift around the shared OP position (``SENSOR_LAT``/``SENSOR_LON``, contract C4.2;
+        default Salisbury Plain). All CoT remarks start "SIMULATED: " (C4.3) and each unit
+        updates at most every ``SIM_MIN_UPDATE_S`` (C4.4)."""
         callsigns = ["Alpha1", "Bravo2", "Charlie3", "Delta4", "Echo5"]
-        base_lat, base_lon = 51.5, -1.5  # Salisbury Plain area
+        base_lat, base_lon = sim_centre()
+        last_sent: dict[str, float] = {}
 
         positions = {cs: (base_lat + random.uniform(-0.02, 0.02),
                           base_lon + random.uniform(-0.05, 0.05))
@@ -365,7 +371,13 @@ class MeshBridge:
         logger.info("Simulator started with %d nodes", len(callsigns))
 
         while self._running:
-            cs = random.choice(callsigns)
+            now = time.time()
+            ready = [c for c in callsigns if now - last_sent.get(c, 0.0) >= SIM_MIN_UPDATE_S]
+            if not ready:
+                time.sleep(1.0)
+                continue
+            cs = random.choice(ready)
+            last_sent[cs] = now
 
             # Drift position slightly
             lat, lon = positions[cs]
@@ -394,6 +406,7 @@ class MeshBridge:
 
             cot_xml = meshtastic_to_cot_xml(packet, _battery_cache)
             if cot_xml:
+                cot_xml = label_simulated(cot_xml)
                 logger.info("SIM position: %s @ %.5f, %.5f", cs, lat, lon)
                 self._send_to_tak(cot_xml)
 
@@ -416,10 +429,27 @@ class MeshBridge:
                 }
                 cot_xml = meshtastic_to_cot_xml(msg_packet, _battery_cache)
                 if cot_xml:
+                    cot_xml = label_simulated(cot_xml)
                     logger.info("SIM chat: %s: %s", cs, msg_packet["decoded"]["text"])
                     self._send_to_tak(cot_xml)
 
             time.sleep(random.uniform(3, 8))
+
+
+SIM_MIN_UPDATE_S = 5.0
+SIM_DEFAULT_CENTRE = (51.15, -1.75)  # Salisbury Plain, same as the other tools' simulators
+
+
+def sim_centre() -> tuple[float, float]:
+    """Shared OP position from SENSOR_LAT/SENSOR_LON, else the default demo site (never 0,0)."""
+    try:
+        lat = float(os.environ.get("SENSOR_LAT", "").strip())
+        lon = float(os.environ.get("SENSOR_LON", "").strip())
+        if lat or lon:
+            return lat, lon
+    except ValueError:
+        pass
+    return SIM_DEFAULT_CENTRE
 
 
 def parse_args():
