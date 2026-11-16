@@ -7,7 +7,10 @@
    It is never re-checked.
 3. **Unique callsign.** A new uid whose callsign another EUD already has gets no EUD row.
 
-Relayed events go to every bound connection except the sender's. Test helper, stdlib only.
+Relayed events go to every bound connection except the sender's. ``markers`` mimics
+cot_parser.parse_marker's storage: a marker-type event with no ``<takv>``/``<contact endpoint>`` is
+stored only with a real position (``point_id`` is NOT NULL) and a ``<link uid>``, if any, that
+is an EUD uid (``parent_uid`` foreign key); failures go to ``marker_errors``. Test helper, stdlib only.
 """
 
 from __future__ import annotations
@@ -19,6 +22,10 @@ import time
 
 _UID = re.compile(r'<event[^>]*\suid="([^"]*)"')
 _CALLSIGN = re.compile(r'<contact[^>]*\scallsign="([^"]*)"')
+_TYPE = re.compile(r'<event[^>]*\stype="([^"]*)"')
+_POINT = re.compile(r'<point[^>]*\slat="([^"]*)"[^>]*\slon="([^"]*)"')
+_LINK = re.compile(r'<link[^>]*\suid="([^"]*)"')
+_MARKER_TYPE = re.compile(r"^(a-[fhupansjk]-[ZPAGSUF]|b-m-p)")
 
 
 class _Conn:
@@ -35,6 +42,8 @@ class FakeOTS:
         self.euds: dict[str, str] = {}  # uid -> callsign
         self.dropped: list[str] = []  # sender uids whose events were dropped (FK)
         self.relayed: list[str] = []  # event uids relayed
+        self.markers: dict[str, str] = {}  # stored marker uid -> callsign
+        self.marker_errors: list[str] = []
         self.conns: list[_Conn] = []
         self._lock = threading.Lock()
         self._srv = socket.socket()
@@ -111,9 +120,27 @@ class FakeOTS:
                 self.dropped.append(sender)
                 return
             self.relayed.append(ev_uid)
+            self._store_marker(ev, ev_uid)
             targets = [o for o in self.conns if o.bound and o.uid != sender]
         for o in targets:
             try:
                 o.sock.sendall(ev.encode())
             except OSError:
                 pass
+
+    def _store_marker(self, ev: str, ev_uid: str):
+        t = _TYPE.search(ev)
+        cot_type = t.group(1) if t else ""
+        if (not _MARKER_TYPE.match(cot_type) or cot_type == "b-m-p-s-p-loc" or "<takv" in ev
+                or re.search(r"<contact[^>]*endpoint=", ev)):
+            return
+        p = _POINT.search(ev)
+        lat, lon = (p.group(1), p.group(2)) if p else ("0", "0")
+        link = _LINK.search(ev)
+        if lat.startswith("999") or (float(lat) == 0 and float(lon) == 0):
+            self.marker_errors.append(f"{ev_uid}: no point ('NoneType' object is not subscriptable)")
+        elif link and link.group(1) not in self.euds:
+            self.marker_errors.append(f"{ev_uid}: parent_uid {link.group(1)} not in euds")
+        else:
+            cs = _CALLSIGN.search(ev)
+            self.markers[ev_uid] = cs.group(1) if cs else ""

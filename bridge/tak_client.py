@@ -23,6 +23,20 @@ So, per tool process (C5.1-C5.4):
 * every marker goes on that same connection, and only after registration (queued until then);
 * receivers pass ``on_event`` and get every CoT event OTS relays to them.
 
+Markers (``build_marker`` / ``TakClient.marker``): OTS relays any CoT from a registered sender,
+but it only stores a marker (OTS web map, ``/api/markers``) when cot_parser.parse_marker can
+insert it. From the 1.8.3 source:
+
+* type ``a-[fhupansjk]-[ZPAGSUF]...`` or ``b-m-p...`` (not ``b-m-p-s-p-loc``);
+* **no** ``<takv>`` and **no** ``<contact endpoint=...>`` (those mean "EUD position update");
+* a **real position**: ``markers.point_id`` is NOT NULL, and OTS stores no point for lat/lon 0,0
+  or lat "999...". Without a position the insert fails ("'NoneType' object is not
+  subscriptable") and the marker is relayed but never stored;
+* ``<link uid=...>`` only to an **EUD uid** (``markers.parent_uid`` is a foreign key to
+  ``euds.uid``), e.g. this tool's registration uid. A link to another marker fails the same way;
+* name from ``<contact callsign>``; optional ``<color argb>``, ``<usericon iconsetpath>``,
+  ``<precisionlocation altsrc>``. ``<remarks>`` is relayed but not stored in the markers table.
+
 Self-contained (stdlib only); the same file is in each kit repo.
 Env: ``TAK_HOST`` (127.0.0.1), ``TAK_PORT`` (8087), ``ISR_HOST``, ``SENSOR_LAT``/``SENSOR_LON``,
 ``TAK_REGISTER_DELAY_S`` (3; tests use less).
@@ -93,6 +107,45 @@ def build_sa(uid: str, callsign: str, device: str, lat: float | None, lon: float
     )
 
 
+def build_marker(uid: str, cot_type: str, callsign: str, lat: float | None, lon: float | None,
+                 now: float | None = None, stale_s: float = 300.0, hae: float = 0.0, ce: float = 10.0,
+                 le: float = 10.0, remarks: str = "", how: str = "m-g", parent_uid: str | None = None,
+                 parent_callsign: str | None = None, argb: int | None = None,
+                 iconsetpath: str | None = None, speed: float | None = None, course: float | None = None,
+                 location_source: str | None = None, extra: str = "") -> str | None:
+    """A marker OTS relays *and* stores (see the module docstring). None without a position:
+    a position-bearing marker is never sent at 0,0 (contract C4.2)."""
+    from xml.sax.saxutils import escape
+
+    if lat is None or lon is None or (lat == 0 and lon == 0):
+        return None
+    now = time.time() if now is None else now
+    t = cot_time(now)
+    detail = [f"<contact callsign={quoteattr(callsign)}/>"]
+    if remarks:
+        detail.append(f"<remarks>{escape(remarks)}</remarks>")
+    if parent_uid:  # must be an EUD uid (markers.parent_uid -> euds.uid)
+        attrs = f'uid={quoteattr(parent_uid)} relation="p-p" type="{SA_TYPE}" production_time="{t}"'
+        if parent_callsign:
+            attrs += f" parent_callsign={quoteattr(parent_callsign)}"
+        detail.append(f"<link {attrs}/>")
+    if argb is not None:
+        detail.append(f'<color argb="{int(argb)}"/>')
+    if iconsetpath:
+        detail.append(f"<usericon iconsetpath={quoteattr(iconsetpath)}/>")
+    if speed is not None or course is not None:
+        detail.append(f'<track speed="{(speed or 0):.1f}" course="{(course or 0):.1f}"/>')
+    if location_source:
+        detail.append(f"<precisionlocation altsrc={quoteattr(location_source)} "
+                      f"geopointsrc={quoteattr(location_source)}/>")
+    return (
+        f'<event version="2.0" uid={quoteattr(uid)} type={quoteattr(cot_type)} how={quoteattr(how)} '
+        f'time="{t}" start="{t}" stale="{cot_time(now + stale_s)}">'
+        f'<point lat="{lat:.7f}" lon="{lon:.7f}" hae="{hae:.1f}" ce="{ce:.0f}" le="{le:.0f}"/>'
+        f"<detail>{''.join(detail)}{extra}</detail></event>"
+    )
+
+
 class CotStream:
     """Splits a TCP byte stream into complete ``<event>...</event>`` strings."""
 
@@ -152,6 +205,13 @@ class TakClient:
 
     def sa(self, now: float | None = None) -> str:
         return build_sa(self.uid, self.callsign, self.device, self.sensor_lat, self.sensor_lon, now)
+
+    def marker(self, uid: str, cot_type: str, callsign: str, lat: float | None, lon: float | None,
+               **kw) -> str | None:
+        """``build_marker`` with this tool as the parent EUD, so OTS can store it."""
+        kw.setdefault("parent_uid", self.uid)
+        kw.setdefault("parent_callsign", self.callsign)
+        return build_marker(uid, cot_type, callsign, lat, lon, **kw)
 
     # ── public ────────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from bridge.tak_client import TakClient, build_sa
+from bridge.tak_client import TakClient, build_marker, build_sa
 from tests.fake_ots import FakeOTS
 
 BIND = 0.3
@@ -122,3 +122,29 @@ def test_sa_resent_periodically(ots):
     tx = client(ots, "tx", "TX", sa_interval=0.3).start()
     assert until(lambda: sum("isrkit-tx-isr-pi" in e for e in got) >= 3, 5)
     rx.stop(), tx.stop()
+
+
+def test_build_marker_fields_and_no_position():
+    ev = ET.fromstring(build_marker("DRONE-1", "a-h-A-M-F-Q", "UAV 1", 51.15, -1.75, now=1000,
+                                    remarks="SIMULATED: x", parent_uid="isrkit-x-isr-pi",
+                                    parent_callsign="X isr-pi", speed=3, course=90, argb=-65536))
+    assert ev.find("detail/contact").get("endpoint") is None and ev.find("detail/takv") is None
+    assert ev.find("detail/link").get("uid") == "isrkit-x-isr-pi"
+    assert ev.find("detail/remarks").text == "SIMULATED: x"
+    assert ev.find("detail/color").get("argb") == "-65536" and ev.find("detail/track").get("course") == "90.0"
+    assert ev.get("stale") > ev.get("start")
+    assert build_marker("u", "a-u-G", "c", None, None) is None
+    assert build_marker("u", "a-u-G", "c", 0.0, 0.0) is None  # never a marker at 0,0
+
+
+def test_markers_are_stored_by_ots_only_with_position_and_eud_parent(ots):
+    tx = client(ots, "tx", "TX", sensor_lat=51.15, sensor_lon=-1.75).start()
+    assert tx.wait_registered(3)
+    tx.send(tx.marker("DRONE-OK", "a-h-A-M-F-Q", "UAV OK", 51.151, -1.751))
+    tx.send(marker("DRONE-NOPOS").replace('lat="51.15" lon="-1.75"', 'lat="0" lon="0"'))
+    tx.send(build_marker("DRONE-BADLINK", "a-u-G", "bad link", 51.15, -1.75, parent_uid="DRONE-OK"))
+    assert until(lambda: len(ots.markers) + len(ots.marker_errors) >= 3)
+    assert ots.markers == {"DRONE-OK": "UAV OK"}
+    assert any("DRONE-NOPOS" in e for e in ots.marker_errors)
+    assert any("DRONE-BADLINK" in e and "parent_uid" in e for e in ots.marker_errors)
+    tx.stop()

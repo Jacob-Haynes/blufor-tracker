@@ -60,3 +60,19 @@ def test_db_lookup_says_listener_not_bound_when_both_registered(ots):
 
 def test_euds_lookup_without_psql_or_config_is_none(tmp_path):
     assert check.euds_lookup(["u"], ["c"], config=str(tmp_path / "missing.yml")) is None
+
+
+def test_check_marker_is_stored_when_position_set(ots, monkeypatch):
+    monkeypatch.setenv("SENSOR_LAT", "51.15")
+    monkeypatch.setenv("SENSOR_LON", "-1.75")
+    ok, msg = run(ots)
+    assert ok and "not set" not in msg
+    assert "ISR-CHECK-isr-pi" in ots.markers and not ots.marker_errors
+
+
+def test_check_marker_without_position_is_relayed_but_not_stored(ots, monkeypatch):
+    monkeypatch.delenv("SENSOR_LAT", raising=False)
+    monkeypatch.delenv("SENSOR_LON", raising=False)
+    ok, msg = run(ots)
+    assert ok and "SENSOR_LAT/LON not set" in msg
+    assert "ISR-CHECK-isr-pi" not in ots.markers

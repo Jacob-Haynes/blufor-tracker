@@ -61,13 +61,23 @@ def explain_no_listener(host: str, port: int, error: OSError) -> str:
 CHECK_MARKER_PREFIX = "ISR-CHECK-"
 
 
-def _marker(uid: str, now: float | None = None) -> str:
-    """Test marker: already stale (never drawn), no position."""
+def _marker(uid: str, tag: str, client=None, now: float | None = None) -> str:
+    """Test marker, already stale (never drawn). With SENSOR_LAT/LON set it is built with
+    tak_client.marker so OTS also stores it (one row per station, updated each run); without a
+    position OTS still relays it but logs "Failed to parse marker" and does not store it."""
+    from bridge.tak_client import _env_float
+
     now = time.time() if now is None else now
+    lat, lon = _env_float("SENSOR_LAT"), _env_float("SENSOR_LON")
+    remarks = f"isr-kit self-check marker {tag}"
+    if client is not None:
+        xml = client.marker(uid, "a-u-G", "ISR CHECK", lat, lon, now=now, stale_s=0, remarks=remarks)
+        if xml:
+            return xml
     t = _t(now)
     return (f'<event version="2.0" uid={quoteattr(uid)} type="a-u-G" how="h-g-i-g-o" time="{t}" '
             f'start="{t}" stale="{t}"><point lat="0" lon="0" hae="9999999" ce="9999999" le="9999999"/>'
-            f'<detail><remarks>isr-kit self-check marker</remarks></detail></event>')
+            f'<detail><remarks>{remarks}</remarks></detail></event>')
 
 
 def euds_lookup(uids: list[str], callsigns: list[str], config: str | None = None) -> dict | None:
@@ -116,6 +126,12 @@ def euds_lookup(uids: list[str], callsigns: list[str], config: str | None = None
     return {"by_uid": {u: c for u, c in rows}, "by_callsign": {c: u for u, c in rows if c}}
 
 
+def _sensor_pos():
+    from bridge.tak_client import _env_float
+
+    return _env_float("SENSOR_LAT"), _env_float("SENSOR_LON")
+
+
 def check_tak(host: str, port: int, timeout: float = 8.0, station: str | None = None,
               register_delay: float | None = None, db=euds_lookup) -> tuple[bool, str]:
     from bridge.tak_client import TakClient
@@ -131,7 +147,8 @@ def check_tak(host: str, port: int, timeout: float = 8.0, station: str | None = 
                   register_delay=register_delay, sensor_lat=0.0, sensor_lon=0.0, device="blufor-tracker")
     a = TakClient("check-a", "CHECK-A", host=host, port=port, station=station, on_event=got_a.append,
                   register_delay=register_delay, sensor_lat=0.0, sensor_lon=0.0, device="blufor-tracker")
-    marker_uid = f"{CHECK_MARKER_PREFIX}{uuid.uuid4().hex[:8]}"
+    tag = uuid.uuid4().hex[:8]  # matches this run's marker; its uid is stable per station
+    marker_uid = f"{CHECK_MARKER_PREFIX}{b.station}"
     wait_reg = (b.register_delay or 0) + 10
     try:
         b.start()
@@ -140,17 +157,20 @@ def check_tak(host: str, port: int, timeout: float = 8.0, station: str | None = 
         a.start()
         if not a.wait_registered(wait_reg):
             return False, f"CHECK-A could not connect and register at {host}:{port} ({a.last_error})"
-        a.send(_marker(marker_uid))
+        a.send(_marker(marker_uid, tag, a))
         b.send_sa_now()  # lets A tell whether OTS relays B at all
         deadline = time.time() + timeout
-        while time.time() < deadline and not any(marker_uid in e for e in got_b):
+        while time.time() < deadline and not any(tag in e for e in got_b):
             time.sleep(0.1)
     finally:
         a.stop()
         b.stop()
 
-    if any(marker_uid in e for e in got_b):
-        return True, f"round-trip OK: OTS at {host}:{port} stored and relayed CHECK-A's marker to CHECK-B"
+    if any(tag in e for e in got_b):
+        note = "" if a.marker(marker_uid, "a-u-G", "x", *_sensor_pos()) else (
+            " (SENSOR_LAT/LON not set: OTS relays the marker but can't store it on its web map, "
+            "so cot_parser logs 'Failed to parse marker' for it; that is expected)")
+        return True, f"round-trip OK: OTS at {host}:{port} relayed CHECK-A's marker to CHECK-B{note}"
 
     b_saw_a = any(a.uid in e for e in got_b)
     a_saw_b = any(b.uid in e for e in got_a)
