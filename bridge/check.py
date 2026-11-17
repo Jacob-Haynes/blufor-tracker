@@ -71,7 +71,7 @@ def _marker(uid: str, tag: str, client=None, now: float | None = None) -> str:
     lat, lon = _env_float("SENSOR_LAT"), _env_float("SENSOR_LON")
     remarks = f"isr-kit self-check marker {tag}"
     if client is not None:
-        xml = client.marker(uid, "a-u-G", "ISR CHECK", lat, lon, now=now, stale_s=0, remarks=remarks)
+        xml = client.marker(uid, "a-u-G", "ISTAR check", lat, lon, now=now, stale_s=0, remarks=remarks)
         if xml:
             return xml
     t = _t(now)
@@ -241,7 +241,7 @@ def check_mqtt(host: str, port: int, user: str, password: str, mesh_text: str | 
 
 def main(argv=None) -> int:
     env = os.environ.get
-    p = argparse.ArgumentParser(description="ISR kit self-check (TAK + MQTT/meshbus + heartbeats)")
+    p = argparse.ArgumentParser(description="ISTAR kit self-check (TAK + MQTT/meshbus + heartbeats)")
     p.add_argument("--tak-host", default=env("TAK_HOST", "127.0.0.1"))
     p.add_argument("--tak-port", type=int, default=int(env("TAK_PORT", "8087")))
     p.add_argument("--mqtt-host", default=env("MQTT_HOST", "127.0.0.1"))
