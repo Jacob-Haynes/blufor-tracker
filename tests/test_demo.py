@@ -195,7 +195,7 @@ def test_demo_page_and_api(server):
     code, body, ctype = _req(port, "/")
     assert code == 200 and ctype.startswith("text/html")
     html = body.decode()
-    assert 'id="demo-card"' in html and "Clear demo" in html and "isr-ui.css?v=2" in html
+    assert 'id="demo-card"' in html and "Clear demo" in html and "isr-ui.css?v=3" in html
     assert _req(port, "/static/isr-ui.css")[0] == 200 and _req(port, "/static/fonts/ibm-plex-mono-400.woff2")[0] == 200
     assert _req(port, "/static/../demo.py")[0] == 404 and _req(port, "/static/%2e%2e/demo.py")[0] == 404
     assert json.loads(_req(port, "/api/demo/scenarios")[1])["mode"] == "on_demand"

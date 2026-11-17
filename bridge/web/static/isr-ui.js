@@ -1,4 +1,4 @@
-/* isr-ui.js v2: shared header behaviour (exercise band, Zulu DTG, status, Kit link). Vendor unchanged as
+/* isr-ui.js v3: shared header behaviour (exercise band, Zulu DTG, status, Kit link). Vendor unchanged as
    <package>/static/isr-ui.js next to isr-ui.css.
 
    Markup the page provides:

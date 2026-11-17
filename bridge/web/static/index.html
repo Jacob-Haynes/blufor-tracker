@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blue force tracker</title>
-<link rel="stylesheet" href="/static/isr-ui.css?v=2">
-<script src="/static/isr-ui.js?v=2"></script>
+<link rel="stylesheet" href="/static/isr-ui.css?v=3">
+<script src="/static/isr-ui.js?v=3"></script>
 <style>
   .bf-btns { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 8px; }
   .bf-btns .bf-clear { margin-left: auto; }
@@ -37,7 +37,7 @@
 
   <div class="isr-card">
     <h2>Simulated units</h2>
-    <div class="bf-count"><span class="isr-big" id="count">00</span><span class="isr-tag sim" id="sim-tag" style="display:none">SIM</span></div>
+    <div class="bf-count"><span class="isr-big" id="count">00</span><span class="isr-tag sim" id="sim-tag" hidden>SIM</span></div>
     <ul class="isr-list" id="units"></ul>
     <p class="isr-muted" id="empty">None on the map. Real units on the mesh appear in ATAK, not here.</p>
   </div>
@@ -66,7 +66,7 @@
   function render() {
     const units = st.units || [];
     document.getElementById('count').textContent = String(units.length).padStart(2, '0');
-    document.getElementById('sim-tag').style.display = units.length ? '' : 'none';
+    document.getElementById('sim-tag').hidden = !units.length;
     document.getElementById('empty').hidden = units.length > 0;
     document.getElementById('units').innerHTML = units.map(u => `<li>
       <span class="bf-unit"><span class="aff friend"></span>${esc(u.callsign)}</span>

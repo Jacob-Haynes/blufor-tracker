@@ -1,10 +1,14 @@
-/* isr-ui.css v2 "command post", British understated: the shared look for every ISR kit page. Vendor this file, isr-ui.js
+/* isr-ui.css v3 "command post", British understated: the shared look for every ISR kit page. Vendor this file, isr-ui.js
    and fonts/ unchanged into <package>/static/; change them in pi-profiles/ui/ and re-copy, never edit a copy.
    Fonts: Barlow Condensed and IBM Plex Mono, SIL Open Font License (fonts/OFL-*.txt). */
 @font-face { font-family: "Barlow Condensed"; font-weight: 500; font-display: swap; src: url("fonts/barlow-condensed-500.woff2") format("woff2"); }
 @font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-600.woff2") format("woff2"); }
 @font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url("fonts/ibm-plex-mono-400.woff2") format("woff2"); }
 @font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url("fonts/ibm-plex-mono-500.woff2") format("woff2"); }
+
+/* v3: `hidden` always hides, even on elements the kit gives a display (.isr-tag is inline-block, so a
+   hidden SIM tag used to show). */
+[hidden] { display: none !important; }
 
 :root {
   /* Graphite base, warm off-white text: quiet, not camouflage */
