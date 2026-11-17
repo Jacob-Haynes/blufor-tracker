@@ -6,7 +6,8 @@ Payload (kit contract)::
      "mode": "cpu|cuda|mps|gemini|llm|vlm|simulate|replay", "status": "ok|degraded|error|stopped",
      "ts": <unix seconds>, "detail": "<optional human text>"}
 
-The launcher on the Pi reads these. ``detail`` is an optional extra. On a clean exit
+The launcher on the Pi reads these. ``detail`` is an optional extra. ``extra_fn()`` may add more
+keys (e.g. ``demo_mode``/``demo_active``, demo trigger contract); the keys above always win. On a clean exit
 ``stop()`` publishes a retained ``"stopped"``; if the process dies, the broker
 publishes the MQTT will (``"error"``, "connection lost").
 
@@ -52,15 +53,17 @@ def default_url(port: int | None, path: str = "/") -> str:
     return f"http://{short_hostname()}.local:{port}{path}"
 
 
-def build_payload(tool: str, url: str, mode: str, status: str, detail: str = "", now: float | None = None) -> dict:
-    payload = {
+def build_payload(tool: str, url: str, mode: str, status: str, detail: str = "", now: float | None = None,
+                  extra: dict | None = None) -> dict:
+    payload = dict(extra or {})
+    payload.update({
         "tool": tool,
         "host": short_hostname(),
         "url": url,
         "mode": mode if mode in MODES else "cpu",
         "status": status if status in STATUSES else "error",
         "ts": int(time.time() if now is None else now),
-    }
+    })
     if detail:
         payload["detail"] = detail[:200]
     return payload
@@ -73,11 +76,13 @@ class Heartbeat:
     """
 
     def __init__(self, tool: str, state_fn: Callable[[], tuple[str, str, str]], port: int | None = None,
-                 url: str | None = None, interval: float = INTERVAL_S):
+                 url: str | None = None, interval: float = INTERVAL_S,
+                 extra_fn: Callable[[], dict] | None = None):
         self.tool = tool
         self.topic = TOPIC_FMT.format(tool=tool)
         self.url = url if url is not None else default_url(port)
         self._state_fn = state_fn
+        self._extra_fn = extra_fn
         self._interval = interval
         self._enabled = os.environ.get("HEARTBEAT", "1").strip() != "0"
         self._running = False
@@ -117,12 +122,21 @@ class Heartbeat:
         except Exception as e:
             return "cpu", "error", f"state check failed: {e}"[:200]
 
+    def _safe_extra(self) -> dict:
+        if self._extra_fn is None:
+            return {}
+        try:
+            return dict(self._extra_fn() or {})
+        except Exception:
+            logger.debug("Heartbeat extra failed", exc_info=True)
+            return {}
+
     def publish_now(self, status_override: str | None = None, detail: str | None = None) -> bool:
         if self._client is None or not self._client.is_connected():
             return False
         mode, status, d = self._safe_state()
         payload = build_payload(self.tool, self.url, mode, status_override or status,
-                                d if detail is None else detail)
+                                d if detail is None else detail, extra=self._safe_extra())
         info = self._client.publish(self.topic, json.dumps(payload), qos=1, retain=True)
         return info.rc == 0
 

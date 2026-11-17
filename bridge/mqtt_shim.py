@@ -34,6 +34,18 @@ from bridge.heartbeat import Heartbeat, short_hostname
 HEARTBEAT_TOOL = "blufor-tracker"
 
 
+def _demo_extra(demo) -> dict:
+    """Heartbeat keys for the launcher (demo trigger contract), plus where the Demo page is."""
+    if demo is None:
+        return {}
+    from bridge.demo import demo_port
+
+    extra = demo.heartbeat_extra()
+    if demo_port():
+        extra["demo_url"] = f"http://{short_hostname()}.local:{demo_port()}/"
+    return extra
+
+
 def _ots_url() -> str:
     # The bridge has no UI of its own; the launcher links to the OTS web UI on this host
     return os.environ.get("PUBLIC_URL") or f"http://{short_hostname()}.local/"
@@ -99,7 +111,8 @@ def fit_chat(tak, message: str, limit: int = DATA_PAYLOAD_LEN) -> tuple[bytes, b
 
 class MqttShim:
     def __init__(self, port: str, mqtt_host: str = "127.0.0.1", mqtt_port: int = 1883,
-                 mqtt_user: str = "guest", mqtt_pass: str = "guest"):
+                 mqtt_user: str = "guest", mqtt_pass: str = "guest", demo=None):
+        self.demo = demo  # bridge.demo.DemoController (step-by-step demo), or None
         self.port = port
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
@@ -121,14 +134,16 @@ class MqttShim:
         self._send_lock = threading.Lock()
         self._meshbus = meshbus.MeshbusGateway(self._meshbus_send)
         self._radio_state = "starting"
-        self._heartbeat = Heartbeat(HEARTBEAT_TOOL, self._heartbeat_state, url=_ots_url())
+        self._heartbeat = Heartbeat(HEARTBEAT_TOOL, self._heartbeat_state, url=_ots_url(),
+                                    extra_fn=lambda: _demo_extra(self.demo))
 
     def _heartbeat_state(self):
+        demo = self.demo.heartbeat_text() if self.demo else ""
         if self._interface is None:
-            return "cpu", "degraded", f"waiting for radio ({self.port})"
+            return "cpu", "degraded", f"waiting for radio ({self.port})" + demo
         mqtt_ok = bool(self._mqtt and self._mqtt.is_connected())
         detail = f"radio {self._gateway_id} on {self.port}; meshbus sent {self._meshbus.stats['sent']}"
-        return "cpu", "ok" if mqtt_ok else "degraded", detail if mqtt_ok else detail + "; OTS MQTT down"
+        return "cpu", "ok" if mqtt_ok else "degraded", (detail if mqtt_ok else detail + "; OTS MQTT down") + demo
 
     def start(self):
         self._running = True
@@ -638,8 +653,11 @@ class SimulatedMeshbus:
         "Comms check",
     ]
 
-    def __init__(self, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, interval: float = 20.0):
+    def __init__(self, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, interval: float = 20.0, demo=None):
         self._interval = interval
+        self.demo = demo
+        # DEMO_MODE=on_demand: meshbus still served, but no fake mesh texts on their own
+        self.fake_texts = demo is None or demo.mode == "continuous"
         self._gateway = meshbus.MeshbusGateway(self._fake_send)
         self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mesh-shim-sim",
                                  protocol=mqtt.MQTTv311)
@@ -651,8 +669,10 @@ class SimulatedMeshbus:
         self._mqtt.connect_async(mqtt_host, mqtt_port, keepalive=60)
         self._heartbeat = Heartbeat(
             HEARTBEAT_TOOL,
-            lambda: ("simulate", "ok" if self._mqtt.is_connected() else "degraded", "simulated mesh, no radio"),
-            url=_ots_url(),
+            lambda: ("simulate", "ok" if self._mqtt.is_connected() else "degraded",
+                     ("simulated mesh, no radio" if self.fake_texts else "meshbus only, no radio, no fake texts")
+                     + (self.demo.heartbeat_text() if self.demo else "")),
+            url=_ots_url(), extra_fn=lambda: _demo_extra(self.demo),
         )
 
     @staticmethod
@@ -663,8 +683,13 @@ class SimulatedMeshbus:
         self._mqtt.loop_start()
         self._gateway.start()
         self._heartbeat.start()
-        logger.info("Simulation mode — meshbus only, fake mesh texts every ~%.0fs", self._interval)
+        if self.fake_texts:
+            logger.info("Simulation mode — meshbus only, fake mesh texts every ~%.0fs", self._interval)
+        else:
+            logger.info("Simulation mode, DEMO_MODE=on_demand — meshbus only, no fake mesh texts")
         try:
+            while not self.fake_texts:
+                time.sleep(1.0)
             while True:
                 time.sleep(random.uniform(self._interval * 0.5, self._interval * 1.5))
                 node_id, short, long_name = random.choice(self.NODES)
@@ -708,8 +733,15 @@ def main():
     # systemd stops us with SIGTERM: exit through the normal path so the heartbeat says "stopped"
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
+    # Step-by-step demo: the patrol scenario and its Demo page (bridge.demo), in both modes
+    from bridge.bft_sim import sim_centre
+    from bridge.demo import DemoController, demo_mode, serve
+
+    demo = DemoController(sim_centre(), mode=demo_mode()).start()
+    serve(demo)
+
     if args.simulate:
-        SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass).run()
+        SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass, demo=demo).run()
         return
 
     shim = MqttShim(
@@ -718,6 +750,7 @@ def main():
         mqtt_port=args.mqtt_port,
         mqtt_user=args.mqtt_user,
         mqtt_pass=args.mqtt_pass,
+        demo=demo,
     )
     try:
         shim.start()

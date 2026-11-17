@@ -12,6 +12,10 @@ No radio. One ``bridge.tak_client`` connection registers as ``isrkit-blufor-trac
 * remarks start ``SIMULATED: `` (C4.3), units drift around ``SENSOR_LAT``/``SENSOR_LON``
   (default Salisbury Plain, never 0,0; C4.2) and each updates at most every 5 s (C4.4).
 
+``DEMO_MODE=on_demand`` (step-by-step demo) runs none of these units: the process only serves the
+Demo page and API (``bridge.demo``, port ``DEMO_PORT``, default 8170), where the presenter fires the
+``patrol`` scenario. ``DEMO_MODE=continuous`` (default) runs them as before, with the Demo page too.
+
 This replaces the legacy pytak simulator in ``mesh_bridge.py``, whose connection registered as
 its first fake unit and whose opening ``t-x-d-d`` OTS dropped.
 """
@@ -107,7 +111,23 @@ def main(argv=None):
     p.add_argument("--tak-host", default=None, help="TAK server host (env TAK_HOST, default 127.0.0.1)")
     p.add_argument("--tak-port", type=int, default=None, help="TAK server CoT port (env TAK_PORT, default 8087)")
     args, _ = p.parse_known_args(argv)
-    BftSimulator(host=args.tak_host, port=args.tak_port).run()
+    from bridge.demo import DemoController, demo_mode, serve
+
+    mode = demo_mode()
+    sim = BftSimulator(host=args.tak_host, port=args.tak_port)
+    demo = DemoController(sim.centre, client=sim.client, mode=mode).start()
+    serve(demo)
+    if mode == "continuous":
+        sim.run()
+        return
+    logger.info("DEMO_MODE=on_demand: no simulated units until a scenario is fired from the Demo page")
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sim.client.stop()
 
 
 if __name__ == "__main__":

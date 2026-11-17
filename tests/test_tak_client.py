@@ -176,3 +176,22 @@ def test_long_marker_remarks_are_not_cut_and_still_stored(ots):
     assert until(lambda: "DRONE-LONG" in ots.markers)
     assert not ots.nacked
     tx.stop()
+
+
+def test_build_delete_forcedeletes_at_the_op_and_is_relayed(ots):
+    from bridge.tak_client import build_delete
+
+    assert build_delete("DRONE-SIM-X", "a-h-A-M-F-Q", 0.0, 0.0) is None, "never at 0,0"
+    xml = build_delete("DRONE-SIM-X", "a-h-A-M-F-Q", 51.15, -1.75, now=1000.0, remarks="SIMULATED: demo cleared")
+    ev = ET.fromstring(xml)
+    assert ev.get("type") == "t-x-d-d" and ev.get("uid") == "DRONE-SIM-X-del-1000000"
+    assert ev.find("detail/__forcedelete") is not None
+    link = ev.find("detail/link")
+    assert link.get("uid") == "DRONE-SIM-X" and link.get("type") == "a-h-A-M-F-Q"
+    assert ev.find("point").get("lat") == "51.1500000"
+    tx = client(ots, "tx", "TX", sensor_lat=51.15, sensor_lon=-1.75).start()
+    assert tx.wait_registered(3)
+    tx.send(build_delete("DRONE-SIM-Y", "a-u-G", 51.15, -1.75))
+    assert until(lambda: any(u.startswith("DRONE-SIM-Y-del-") for u in ots.relayed))
+    assert not ots.nacked and not any(u.startswith("DRONE-SIM-Y") for u in ots.markers)
+    tx.stop()

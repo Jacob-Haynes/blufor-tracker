@@ -181,6 +181,33 @@ def build_marker(uid: str, cot_type: str, callsign: str, lat: float | None, lon:
     )
 
 
+def build_delete(target_uid: str, target_type: str, lat: float | None, lon: float | None,
+                 now: float | None = None, remarks: str = "") -> str | None:
+    """Remove a marker from ATAK maps at once: ``t-x-d-d`` linked to it, with ``<__forcedelete/>``.
+
+    OTS 1.8.3 relays it but keeps its own stored copy, so send the marker once more with
+    stale = now first. It stores the event's point against the sender, so give the OP (never
+    0,0; None without a position), and it marks the sender "Disconnected" until its next SA, so
+    call ``TakClient.send_sa_now()`` afterwards."""
+    from xml.sax.saxutils import escape
+
+    if lat is None or lon is None or (lat == 0 and lon == 0):
+        return None
+    now = time.time() if now is None else now
+    t = cot_time(now)
+    uid = ots_fit(f"{target_uid}-del-{int(now * 1000)}", "delete uid")
+    detail = (f"<link uid={quoteattr(ots_fit(target_uid, 'delete link uid'))} relation=\"none\" "
+              f"type={quoteattr(target_type)}/><__forcedelete/>")
+    if remarks:
+        detail += f"<remarks>{escape(remarks)}</remarks>"
+    return (
+        f'<event version="2.0" uid={quoteattr(uid)} type="t-x-d-d" how="h-g-i-g-o" '
+        f'time="{t}" start="{t}" stale="{cot_time(now + 10)}">'
+        f'<point lat="{lat:.7f}" lon="{lon:.7f}" hae="0.0" ce="9999999" le="9999999"/>'
+        f"<detail>{detail}</detail></event>"
+    )
+
+
 class CotStream:
     """Splits a TCP byte stream into complete ``<event>...</event>`` strings."""
 

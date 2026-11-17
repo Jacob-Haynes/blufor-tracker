@@ -463,6 +463,21 @@ Serves meshbus with no radio and no OTS. It needs only an MQTT broker (e.g. `mos
 
 `python -m bridge --simulate` runs `bridge/bft_sim.py`: simulated BFT units on ATAK with no radio, the contract-v5 way. It registers once as `isrkit-blufor-tracker-<ISR_HOST>` (callsign `BFT-SIM <ISR_HOST>`) through `bridge/tak_client.py`. It then sends five units as plain markers (`SIM-BFT-Alpha1` …, callsigns `SIM-Alpha1` …), not as devices, so they can't collide with a real ATAK user's callsign, and OTS stores them on its web map. The units move around the shared OP position (`SENSOR_LAT`/`SENSOR_LON`, default 51.15,-1.75), each updates at most every 5 s, and every remark starts `SIMULATED: `. `TAK_HOST`/`TAK_PORT` (default `127.0.0.1:8087`) or `--tak-host`/`--tak-port` choose the server.
 
+### Step-by-step demo (Demo page on port 8170)
+
+Every way of running the bridge serves a small **Demo** page and API on `DEMO_PORT`: `bridge.mqtt_shim` (the real radio bridge, as `mesh-bridge.service` runs it), `bridge.mqtt_shim --simulate` and `python -m bridge --simulate`. The default port is 8170, the first free kit port after isr-maps' 8160, and `DEMO_PORT=0` turns the page off. It binds dual-stack, like the launcher. The API follows ui-kit `DEMO-TRIGGER-CONTRACT.md`:
+
+- `GET /api/demo/scenarios`, `POST /api/demo/trigger {"id": "patrol"}`, `POST /api/demo/clear` (returns `{"ok", "cleared", "tracks"}`).
+- `GET /api/status` returns the demo mode, the active scenarios, the TAK state and the patrol's units.
+
+**`patrol`** puts three simulated friendly units on ATAK for 3 minutes. They walk a route within 300 m of the OP (`SENSOR_LAT`/`SENSOR_LON`) in file, 20 m apart, at 1.5 m/s.
+
+- **Markers:** plain markers like `bft_sim`'s, with uid `SIM-BFT-Patrol1..3`, callsign `SIM-Patrol1..3`, type `a-f-G-U-C` and remarks starting `SIMULATED: `. Each unit updates every 5 s.
+- **TAK connection:** the radio bridge has no TAK connection of its own, so the demo opens one (`isrkit-blufor-tracker-<ISR_HOST>`, callsign `BFT-SIM <ISR_HOST>`) only when a scenario is first fired. Until then nothing new appears on the TAK server.
+- **Clear demo:** stops the patrol and takes its markers off ATAK at once: each marker again with stale = now, then a `t-x-d-d` forcedelete, then the registration SA. A patrol left to finish on its own expires as normal.
+
+`DEMO_MODE=continuous` (default) leaves everything as before. `DEMO_MODE=on_demand` runs no background simulation: `python -m bridge --simulate` sends none of its five units, and `bridge.mqtt_shim --simulate` serves meshbus without fake mesh texts. The real radio bridge runs as normal in both modes. The heartbeat carries `demo_mode`, `demo_active` and `demo_url` (the Demo page), and its `detail` adds e.g. "demo on_demand: patrol (SIMULATED)".
+
 `mesh_bridge.py` (pytak) is **legacy and dev-only**. It isn't contract v5: OTS drops its opening `t-x-d-d`, and its connection registers as its first unit. It's in no profile and runs only with `python -m bridge --legacy`. Production is `bridge.mqtt_shim`.
 
 ### Run mqtt_shim Locally
@@ -493,6 +508,8 @@ bridge/
   channel_url.py      # writes the channel URL (PSK!) for the launcher's onboarding QR
   cot_converter.py    # CoT XML <-> Meshtastic packet conversion
   bft_sim.py          # `python -m bridge --simulate`: simulated BFT units via tak_client
+  demo.py             # step-by-step demo: patrol scenario + Demo page/API on DEMO_PORT (8170)
+  web/static/         # Demo page, shared UI kit copy (isr-ui.css/js, fonts): never edit the kit copy
   tak_client.py       # registered OTS client (contract v5), same file in every kit repo
   mesh_bridge.py      # LEGACY dev-only PyTAK TCP bridge (`python -m bridge --legacy`)
   upstream_relay.py   # optional upstream TAK server relay (used by mesh_bridge)
