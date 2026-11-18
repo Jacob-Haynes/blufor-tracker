@@ -1,4 +1,4 @@
-/* isr-ui.js v3: shared header behaviour (exercise band, Zulu DTG, status, Kit link). Vendor unchanged as
+/* isr-ui.js v4: shared header behaviour (exercise band, Zulu DTG, status, Kit link). Vendor unchanged as
    <package>/static/isr-ui.js next to isr-ui.css.
 
    Markup the page provides:
@@ -14,7 +14,10 @@
    Then call, whenever the page's own status changes:
      ISR.setStatus([{name: "AI", state: "ok", text: "qwen3-vl"}, {name: "TAK", state: "bad", text: "not connected"}]);
    state is ok | warn | bad | idle. The pill shows the worst one as a single word; clicking it lists all.
-   Mark checks that don't matter for this demo with optional: true (they can only make it "Degraded"). */
+   Mark checks that don't matter for this demo with optional: true (they can only make it "Degraded").
+   Kit link (v4): opens in the tab named "isr-kit" (the launcher names its own tab that), so it goes back
+   to the launcher tab instead of opening another one; if that tab was closed, the browser opens a new
+   one with that name. A page can set window.ISR_KIT_SAME_TAB = true to navigate in place instead. */
 (function () {
   var WORD = { ok: "Ready", warn: "Degraded", bad: "Offline", idle: "Off" };  // shown in caps by CSS
   var RANK = { ok: 0, idle: 1, warn: 2, bad: 3 };
@@ -74,7 +77,10 @@
       tick(); setInterval(tick, 10000);
     }
     var link = document.getElementById("isr-kit-link");
-    if (link) link.href = kitUrl();
+    if (link) {
+      link.href = kitUrl();
+      if (!window.ISR_KIT_SAME_TAB) { link.target = "isr-kit"; link.rel = "opener"; }
+    }
     var pill = document.getElementById("isr-status"), list = document.getElementById("isr-status-list");
     if (pill && list) {
       pill.addEventListener("click", function (e) { e.stopPropagation(); list.classList.toggle("open"); });
