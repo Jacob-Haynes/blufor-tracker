@@ -1,4 +1,4 @@
-/* isr-ui.css v3 "command post", British understated: the shared look for every ISR kit page. Vendor this file, isr-ui.js
+/* isr-ui.css v4 "command post", British understated: the shared look for every ISR kit page. Vendor this file, isr-ui.js
    and fonts/ unchanged into <package>/static/; change them in pi-profiles/ui/ and re-copy, never edit a copy.
    Fonts: Barlow Condensed and IBM Plex Mono, SIL Open Font License (fonts/OFL-*.txt). */
 @font-face { font-family: "Barlow Condensed"; font-weight: 500; font-display: swap; src: url("fonts/barlow-condensed-500.woff2") format("woff2"); }
