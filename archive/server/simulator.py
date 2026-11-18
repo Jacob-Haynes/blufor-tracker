@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 CALLSIGNS = ["ALPHA-1", "BRAVO-2", "CHARLIE-3", "DELTA-4", "ECHO-5"]
 
-# Start near Salisbury Plain training area, SP4 London
-BASE_LAT = 51.1500
-BASE_LON = -1.7500
+# Start on Salisbury Plain (public training area), same default as the other kit simulators
+BASE_LAT = 51.15
+BASE_LON = -1.75
 
 CANNED_MESSAGES = [
     "ROGER",

@@ -10,9 +10,14 @@ to ATAK_PLUGIN TAKPackets for the mesh.
 """
 
 import argparse
+import glob
 import json
 import logging
+import os
+import random
+import signal
 import struct
+import sys
 import threading
 import time
 
@@ -23,11 +28,44 @@ from meshtastic.protobuf import atak_pb2, mesh_pb2, mqtt_pb2, portnums_pb2
 from meshtastic.serial_interface import SerialInterface
 from pubsub import pub
 
+from bridge import channel_url, meshbus
+from bridge.heartbeat import Heartbeat, short_hostname
+
+HEARTBEAT_TOOL = "blufor-tracker"
+
+
+def _demo_extra(demo) -> dict:
+    """Heartbeat keys for the launcher (demo trigger contract), plus where the Demo page is."""
+    if demo is None:
+        return {}
+    from bridge.demo import demo_port
+
+    extra = demo.heartbeat_extra()
+    if demo_port():
+        extra["demo_url"] = f"http://{short_hostname()}.local:{demo_port()}/"
+    return extra
+
+
+def _ots_url() -> str:
+    # The bridge has no UI of its own; the launcher links to the OTS web UI on this host
+    return os.environ.get("PUBLIC_URL") or f"http://{short_hostname()}.local/"
 from bridge.cot_converter import parse_cot_event
 
 logger = logging.getLogger("mqtt_shim")
 
 MQTT_ROOT = "opentakserver"
+
+# Serial device patterns probed by --port auto, most specific first
+_SERIAL_GLOBS = ("/dev/serial/by-id/*", "/dev/ttyUSB*", "/dev/ttyACM*")
+_RADIO_WAIT_LOG_INTERVAL = 60  # seconds between "still waiting for radio" logs
+
+
+def find_serial_port() -> str | None:
+    """Return the first Meshtastic-looking serial device, or None."""
+    for pattern in _SERIAL_GLOBS:
+        for dev in sorted(glob.glob(pattern)):
+            return os.path.realpath(dev)
+    return None
 
 # Meshtastic default AES key (used when PSK is a single byte)
 _DEFAULT_KEY = bytearray([
@@ -36,9 +74,45 @@ _DEFAULT_KEY = bytearray([
 ])
 
 
+DATA_PAYLOAD_LEN = mesh_pb2.Constants.DATA_PAYLOAD_LEN  # 233: largest Meshtastic payload
+KIT_UID_PREFIX = "isrkit-"  # kit tools' TAK registrations (contract v5)
+
+
+def is_kit_uid(uid: str) -> bool:
+    uid = uid or ""
+    if uid.startswith("GeoChat."):  # GeoChat.<sender uid>.<room>.<id>
+        uid = uid[len("GeoChat."):]
+    return uid.startswith(KIT_UID_PREFIX)
+
+
+def fit_chat(tak, message: str, limit: int = DATA_PAYLOAD_LEN) -> tuple[bytes, bool]:
+    """Set ``tak.chat.message`` so the serialized TAKPacket fits one LoRa packet.
+    Returns (payload, truncated); a cut message ends in "…"."""
+    tak.chat.message = message
+    raw = tak.SerializeToString()
+    if len(raw) <= limit:
+        return raw, False
+    lo, hi, best = 0, len(message), None
+    while lo <= hi:  # longest prefix that fits with the ellipsis
+        mid = (lo + hi) // 2
+        tak.chat.message = message[:mid].rstrip() + "…"
+        candidate = tak.SerializeToString()
+        if len(candidate) <= limit:
+            best, lo = candidate, mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        tak.chat.message = "…"
+        best = tak.SerializeToString()
+    else:
+        tak.chat.message = message[:hi].rstrip() + "…"
+    return best, True
+
+
 class MqttShim:
     def __init__(self, port: str, mqtt_host: str = "127.0.0.1", mqtt_port: int = 1883,
-                 mqtt_user: str = "guest", mqtt_pass: str = "guest"):
+                 mqtt_user: str = "guest", mqtt_pass: str = "guest", demo=None):
+        self.demo = demo  # bridge.demo.DemoController (step-by-step demo), or None
         self.port = port
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
@@ -52,17 +126,38 @@ class MqttShim:
         self._channel_key: bytes | None = None
         self._running = False
         self._atak_nodes: set[int] = set()  # nodes that send ATAK_PLUGIN (dedup TEXT_MESSAGE_APP)
+        self._warned_long_chat = False
         self._uplinked_texts: dict[str, float] = {}  # text → timestamp (firehose echo prevention)
+        self._my_node_num: int | None = None
+        # The radio is shared by the self-SA, firehose, MQTT downlink and meshbus
+        # threads; serialise writes so packets are not interleaved on the wire.
+        self._send_lock = threading.Lock()
+        self._meshbus = meshbus.MeshbusGateway(self._meshbus_send)
+        self._radio_state = "starting"
+        self._heartbeat = Heartbeat(HEARTBEAT_TOOL, self._heartbeat_state, url=_ots_url(),
+                                    extra_fn=lambda: _demo_extra(self.demo))
+
+    def _heartbeat_state(self):
+        demo = self.demo.heartbeat_text() if self.demo else ""
+        if self._interface is None:
+            return "cpu", "degraded", f"waiting for radio ({self.port})" + demo
+        mqtt_ok = bool(self._mqtt and self._mqtt.is_connected())
+        detail = f"radio {self._gateway_id} on {self.port}; meshbus sent {self._meshbus.stats['sent']}"
+        return "cpu", "ok" if mqtt_ok else "degraded", (detail if mqtt_ok else detail + "; OTS MQTT down") + demo
 
     def start(self):
         self._running = True
+        self._heartbeat.start()
 
-        # Connect to Meshtastic serial
+        # Connect to Meshtastic serial (waits for the radio to be plugged in)
+        self.port = self._wait_for_radio(self.port)
         logger.info("Connecting to Meshtastic on %s", self.port)
         self._interface = SerialInterface(devPath=self.port)
+        pub.subscribe(self._on_connection_lost, "meshtastic.connection.lost")
 
         # Get gateway ID from radio
         node_num = self._interface.myInfo.my_node_num
+        self._my_node_num = node_num
         self._gateway_id = f"!{node_num:08x}"
         logger.info("Gateway ID: %s", self._gateway_id)
 
@@ -82,6 +177,9 @@ class MqttShim:
         else:
             logger.warning("No channel key — packets will be sent unencrypted")
 
+        # Channel URL for the launcher's onboarding QR (contains the PSK; never logged)
+        channel_url.update_from_interface(self._interface)
+
         # Subscribe to mesh receive events
         pub.subscribe(self._on_mesh_receive, "meshtastic.receive")
 
@@ -90,8 +188,14 @@ class MqttShim:
         self._mqtt.username_pw_set(self.mqtt_user, self.mqtt_pass)
         self._mqtt.on_connect = self._on_mqtt_connect
         self._mqtt.on_message = self._on_mqtt_message
-        self._mqtt.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
+        # connect_async + loop_start retries in the background, so the bridge
+        # still runs (and serves the radio) while OpenTAKServer/RabbitMQ starts.
+        self._mqtt.reconnect_delay_set(min_delay=1, max_delay=30)
+        self._mqtt.connect_async(self.mqtt_host, self.mqtt_port, keepalive=60)
         self._mqtt.loop_start()
+
+        # meshbus transmit worker (other tools -> radio)
+        self._meshbus.start()
 
         # Start firehose consumer (downlink: OTS → serial for ATAK chat)
         self._start_firehose_consumer()
@@ -107,11 +211,56 @@ class MqttShim:
             logger.info("Shutting down")
         finally:
             self._running = False
+            self._heartbeat.stop()
             if self._mqtt:
                 self._mqtt.loop_stop()
                 self._mqtt.disconnect()
             if self._interface:
                 self._interface.close()
+
+    def _wait_for_radio(self, port: str) -> str:
+        """Block until the serial device exists. ``auto`` probes common device paths."""
+        last_log = 0.0
+        while self._running:
+            found = find_serial_port() if port == "auto" else (port if os.path.exists(port) else None)
+            if found:
+                return found
+            now = time.time()
+            if now - last_log > _RADIO_WAIT_LOG_INTERVAL:
+                logger.warning("No Meshtastic radio at %s — plug in the bridge radio (still waiting)",
+                               "/dev/ttyUSB*|/dev/ttyACM*" if port == "auto" else port)
+                last_log = now
+            time.sleep(2)
+        raise SystemExit(0)
+
+    def _on_connection_lost(self, interface=None, **kwargs):
+        # Exit non-zero so systemd restarts us and we re-wait for the radio.
+        logger.error("Meshtastic serial connection lost — exiting for restart")
+        os._exit(1)
+
+    def _send_data(self, payload: bytes, port_num: int):
+        with self._send_lock:
+            self._interface.sendData(payload, portNum=port_num, wantAck=False)
+
+    def _meshbus_send(self, text: str, to: str | None, channel: int):
+        with self._send_lock:
+            self._interface.sendText(
+                text,
+                destinationId=to or "^all",
+                wantAck=bool(to),
+                channelIndex=channel,
+            )
+
+    def _publish_meshbus_rx(self, packet: dict):
+        nodes = getattr(self._interface, "nodes", None) or {}
+        msg = meshbus.build_rx(packet, nodes=nodes, my_node_num=self._my_node_num)
+        if msg is None:
+            return
+        if self._mqtt and self._mqtt.is_connected():
+            self._mqtt.publish(meshbus.TOPIC_RX, json.dumps(msg))
+            logger.info("meshbus RX from=%s ch=%d: %s", msg["from"], msg["channel"], msg["text"][:80])
+        else:
+            logger.warning("MQTT not connected, meshbus/rx dropped")
 
     def _get_channel_key(self) -> bytes | None:
         """Derive the AES key from the primary channel's PSK."""
@@ -156,7 +305,8 @@ class MqttShim:
         if reason_code == 0:
             topic = f"{MQTT_ROOT}/2/e/{self._channel_id}/+"
             client.subscribe(topic)
-            logger.info("MQTT connected, subscribed to %s", topic)
+            client.subscribe(meshbus.TOPIC_TX)
+            logger.info("MQTT connected, subscribed to %s and %s", topic, meshbus.TOPIC_TX)
         else:
             logger.error("MQTT connection failed: %s", reason_code)
 
@@ -173,6 +323,14 @@ class MqttShim:
             if portnum in self._SKIP_PORTNUMS:
                 logger.debug("Skipping %s (OTS bug workaround)", portnum)
                 return
+
+            # Every inbound text goes to meshbus/rx, including from ATAK nodes
+            # (before the ATAK dedup below, which only concerns the OTS uplink).
+            if portnum == "TEXT_MESSAGE_APP":
+                try:
+                    self._publish_meshbus_rx(packet)
+                except Exception:
+                    logger.exception("meshbus/rx publish failed")
 
             # Track all uplinked TEXT_MESSAGE_APP for firehose echo prevention
             if portnum == "TEXT_MESSAGE_APP":
@@ -303,11 +461,17 @@ class MqttShim:
     # ── Self-SA: register B10 as ATAK device on the mesh ──────────
 
     _SELF_SA_INTERVAL = 30  # seconds
+    _CHANNEL_URL_INTERVAL = 60  # seconds between channel-URL change checks
 
     def _start_self_sa(self):
         """Periodically send a PLI TAKPacket so ATAK clients recognise B10."""
         def _sa_loop():
+            last_url_check = time.monotonic()
             while self._running:
+                if time.monotonic() - last_url_check >= self._CHANNEL_URL_INTERVAL:
+                    # picks up channel changes made through this interface's cached node config
+                    channel_url.update_from_interface(self._interface)
+                    last_url_check = time.monotonic()
                 try:
                     self._send_self_sa()
                 except Exception:
@@ -330,17 +494,16 @@ class MqttShim:
         tak.group.role = atak_pb2.MemberRole.Value("HQ")
 
         raw = tak.SerializeToString()
-        self._interface.sendData(
-            raw,
-            portNum=portnums_pb2.PortNum.Value("ATAK_PLUGIN"),
-            wantAck=False,
-        )
+        self._send_data(raw, portnums_pb2.PortNum.Value("ATAK_PLUGIN"))
         logger.debug("Self-SA sent (%d bytes)", len(raw))
 
     # ── MQTT → Serial (downlink: position/non-chat) ────────────────
 
     def _on_mqtt_message(self, client, userdata, msg):
-        """Called when OTS publishes a message for the mesh."""
+        """Called when OTS publishes a message for the mesh, or a tool publishes to meshbus/tx."""
+        if msg.topic == meshbus.TOPIC_TX:
+            self._meshbus.submit(msg.payload)
+            return
         try:
             envelope = mqtt_pb2.ServiceEnvelope()
             envelope.ParseFromString(msg.payload)
@@ -360,11 +523,7 @@ class MqttShim:
                         envelope.gateway_id)
 
             # Send to mesh via serial
-            self._interface.sendData(
-                mesh_packet.decoded.payload,
-                portNum=mesh_packet.decoded.portnum,
-                wantAck=False,
-            )
+            self._send_data(mesh_packet.decoded.payload, mesh_packet.decoded.portnum)
 
         except Exception:
             logger.exception("Error in MQTT→Serial relay")
@@ -397,6 +556,10 @@ class MqttShim:
                     self._on_firehose_cot(body)
 
                 conn.close()
+            except pika.exceptions.AMQPConnectionError as e:
+                if self._running:
+                    logger.warning("Firehose: RabbitMQ not reachable (%s), retrying in 5s", e.__class__.__name__)
+                    time.sleep(5)
             except Exception:
                 if self._running:
                     logger.exception("Firehose consumer error, reconnecting in 5s")
@@ -439,6 +602,13 @@ class MqttShim:
             # Clean old entries
             self._uplinked_texts = {k: v for k, v in self._uplinked_texts.items() if now - v < 60}
 
+            # Kit tools (tac-advisor's replies, ...) answer mesh users themselves over meshbus:
+            # relaying their GeoChat to LoRa only wastes airtime and duplicates.
+            chat_uid = parsed.get("chat_sender_uid", "")
+            if is_kit_uid(chat_uid) or is_kit_uid(sender_uid) or is_kit_uid(parsed.get("uid", "")):
+                logger.debug("Firehose: not relaying kit-tool GeoChat from %s", chat_uid or sender_uid)
+                return
+
             sender = parsed.get("sender_callsign", parsed.get("callsign", "TAK"))
 
             # Build TAKPacket GeoChat for ATAK on mesh (uncompressed only —
@@ -446,20 +616,98 @@ class MqttShim:
             tak = atak_pb2.TAKPacket()
             tak.contact.callsign = sender
             tak.contact.device_callsign = sender_uid or f"TAK-{sender}"
-            tak.chat.message = remarks
             tak.chat.to = "All Chat Rooms"
-
-            raw = tak.SerializeToString()
-            self._interface.sendData(
-                raw,
-                portNum=portnums_pb2.PortNum.Value("ATAK_PLUGIN"),
-                wantAck=False,
-            )
+            raw, truncated = fit_chat(tak, remarks)
+            if truncated and not self._warned_long_chat:
+                logger.warning("Firehose: GeoChat from %s is %d bytes, over the %d-byte LoRa payload: "
+                               "sent truncated ending in '…' (logged once)", sender,
+                               len(remarks.encode()), DATA_PAYLOAD_LEN)
+                self._warned_long_chat = True
+            self._send_data(raw, portnums_pb2.PortNum.Value("ATAK_PLUGIN"))
             logger.info("Firehose→Serial: GeoChat from %s (%d bytes): %s",
                         sender, len(raw), remarks[:80])
 
         except Exception:
             logger.exception("Error processing firehose CoT")
+
+
+class SimulatedMeshbus:
+    """``--simulate``: no radio, no OTS. Serves meshbus only, so tools that use the
+    mesh (tac-advisor, mesh-deadrop) can be exercised on a laptop with any MQTT broker.
+
+    Publishes fake inbound texts on meshbus/rx and logs (rather than transmits)
+    everything arriving on meshbus/tx, through the same validation and rate limits.
+    """
+
+    NODES = [
+        ("!a1a1a1a1", "A1", "Alpha 1"),
+        ("!b2b2b2b2", "B2", "Bravo 2"),
+        ("!c3c3c3c3", "C3", "Charlie 3"),
+    ]
+    TEXTS = [
+        "ADVISOR: sitrep",
+        "ADVISOR: any drone activity?",
+        "DROP B2 Meet at checkpoint bravo 0600",
+        "PICKUP",
+        "STATUS",
+        "Comms check",
+    ]
+
+    def __init__(self, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, interval: float = 20.0, demo=None):
+        self._interval = interval
+        self.demo = demo
+        # DEMO_MODE=on_demand: meshbus still served, but no fake mesh texts on their own
+        self.fake_texts = demo is None or demo.mode == "continuous"
+        self._gateway = meshbus.MeshbusGateway(self._fake_send)
+        self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mesh-shim-sim",
+                                 protocol=mqtt.MQTTv311)
+        self._mqtt.username_pw_set(mqtt_user, mqtt_pass)
+        self._mqtt.on_connect = lambda c, u, f, rc, p: (c.subscribe(meshbus.TOPIC_TX),
+                                                        logger.info("SIM: MQTT connected (%s)", rc))
+        self._mqtt.on_message = lambda c, u, m: self._gateway.submit(m.payload)
+        self._mqtt.reconnect_delay_set(min_delay=1, max_delay=30)
+        self._mqtt.connect_async(mqtt_host, mqtt_port, keepalive=60)
+        self._heartbeat = Heartbeat(
+            HEARTBEAT_TOOL,
+            lambda: ("simulate", "ok" if self._mqtt.is_connected() else "degraded",
+                     ("simulated mesh, no radio" if self.fake_texts else "meshbus only, no radio, no fake texts")
+                     + (self.demo.heartbeat_text() if self.demo else "")),
+            url=_ots_url(), extra_fn=lambda: _demo_extra(self.demo),
+        )
+
+    @staticmethod
+    def _fake_send(text, to, channel):
+        logger.info("SIM radio TX to=%s ch=%d: %s", to or "^all", channel, text)
+
+    def run(self):
+        self._mqtt.loop_start()
+        self._gateway.start()
+        self._heartbeat.start()
+        if self.fake_texts:
+            logger.info("Simulation mode — meshbus only, fake mesh texts every ~%.0fs", self._interval)
+        else:
+            logger.info("Simulation mode, DEMO_MODE=on_demand — meshbus only, no fake mesh texts")
+        try:
+            while not self.fake_texts:
+                time.sleep(1.0)
+            while True:
+                time.sleep(random.uniform(self._interval * 0.5, self._interval * 1.5))
+                node_id, short, long_name = random.choice(self.NODES)
+                packet = {
+                    "fromId": node_id,
+                    "from": int(node_id[1:], 16),
+                    "channel": 0,
+                    "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": random.choice(self.TEXTS)},
+                }
+                nodes = {node_id: {"user": {"shortName": short, "longName": long_name}}}
+                msg = meshbus.build_rx(packet, nodes=nodes)
+                if self._mqtt.is_connected():
+                    self._mqtt.publish(meshbus.TOPIC_RX, json.dumps(msg))
+                    logger.info("SIM meshbus RX from=%s: %s", node_id, msg["text"])
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self._heartbeat.stop()
 
 
 def main():
@@ -470,13 +718,34 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(description="Meshtastic Serial ↔ MQTT shim for OTS")
-    parser.add_argument("--port", default="/dev/ttyUSB0", help="Meshtastic serial port")
-    parser.add_argument("--mqtt-host", default="127.0.0.1", help="MQTT broker host")
-    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
-    parser.add_argument("--mqtt-user", default="guest", help="MQTT username")
-    parser.add_argument("--mqtt-pass", default="guest", help="MQTT password")
+    env = os.environ.get
+    parser = argparse.ArgumentParser(description="Meshtastic Serial ↔ MQTT shim for OTS (+ meshbus)")
+    parser.add_argument("--port", default=env("MESH_PORT", "auto"),
+                        help="Meshtastic serial port, or 'auto' to probe /dev/ttyUSB*, /dev/ttyACM* (default)")
+    parser.add_argument("--mqtt-host", default=env("MQTT_HOST", "127.0.0.1"), help="MQTT broker host")
+    parser.add_argument("--mqtt-port", type=int, default=int(env("MQTT_PORT", "1883")), help="MQTT broker port")
+    parser.add_argument("--mqtt-user", default=env("MQTT_USER", "guest"), help="MQTT username")
+    parser.add_argument("--mqtt-pass", default=env("MQTT_PASS", "guest"), help="MQTT password")
+    parser.add_argument("--simulate", action="store_true",
+                        help="No radio/OTS: serve meshbus with fake mesh texts (for testing other tools)")
     args = parser.parse_args()
+
+    # systemd stops us with SIGTERM: exit through the normal path so the heartbeat says "stopped"
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    # Step-by-step demo: the patrol scenario and its Demo page (bridge.demo), in both modes
+    from bridge.bft_sim import sim_centre
+    from bridge.demo import DemoController, demo_mode, serve
+
+    demo = DemoController(sim_centre(), mode=demo_mode()).start()
+    serve(demo)
+
+    if args.simulate:
+        try:
+            SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass, demo=demo).run()
+        finally:
+            demo.shutdown()  # a running patrol off ATAK at once, not when stale
+        return
 
     shim = MqttShim(
         port=args.port,
@@ -484,8 +753,15 @@ def main():
         mqtt_port=args.mqtt_port,
         mqtt_user=args.mqtt_user,
         mqtt_pass=args.mqtt_pass,
+        demo=demo,
     )
-    shim.start()
+    try:
+        shim.start()
+    except Exception:
+        logger.exception("Bridge failed")
+        sys.exit(1)
+    finally:
+        demo.shutdown()  # a running patrol off ATAK at once, not when stale
 
 
 if __name__ == "__main__":

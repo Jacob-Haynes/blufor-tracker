@@ -76,6 +76,9 @@ def parse_cot_event(xml_str: str) -> dict | None:
         if chat is not None:
             result["chatroom"] = chat.get("chatroom", "")
             result["sender_callsign"] = chat.get("senderCallsign", "")
+            grp = chat.find("chatgrp")
+            if grp is not None and grp.get("uid0"):
+                result["chat_sender_uid"] = grp.get("uid0")
 
         emergency = detail.find("emergency")
         if emergency is not None:
@@ -573,3 +576,20 @@ class CotStreamParser:
 
 def _xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+SIM_REMARKS = "SIMULATED: "
+
+
+def label_simulated(cot_xml: str, note: str = "simulated BFT position") -> str:
+    """Contract C4.3: CoT made in --simulate carries remarks starting "SIMULATED: ".
+
+    Prefixes existing remarks (chat text) or adds a <remarks> element to the detail."""
+    if "<remarks" in cot_xml:
+        import re
+
+        return re.sub(r"(<remarks[^>]*>)(?!SIMULATED: )", lambda m: m.group(1) + SIM_REMARKS, cot_xml, count=1)
+    if "</detail>" in cot_xml:
+        return cot_xml.replace("</detail>", f"<remarks>{SIM_REMARKS}{note}</remarks></detail>", 1)
+    return cot_xml
+

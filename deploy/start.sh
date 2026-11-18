@@ -1,22 +1,11 @@
 #!/usr/bin/env bash
-# Launcher for mqtt_shim with auto-detection of Meshtastic serial port.
-# Used for manual runs — systemd service calls mqtt_shim directly.
+# Manual launcher for the bridge (systemd runs mqtt_shim directly with the same defaults).
+#   deploy/start.sh              # real radio, auto-detected
+#   deploy/start.sh --simulate   # no radio/OTS: meshbus with fake mesh texts
 set -euo pipefail
 
 cd /opt/blufor-tracker
 source .venv/bin/activate
+[ -f /etc/blufor-tracker.env ] && set -a && . /etc/blufor-tracker.env && set +a
 
-# Auto-detect Meshtastic serial port
-PORT=""
-for dev in /dev/ttyUSB* /dev/ttyACM*; do
-    [ -e "$dev" ] && PORT="$dev" && break
-done
-
-if [ -z "$PORT" ]; then
-    echo "ERROR: No Meshtastic device found on /dev/ttyUSB* or /dev/ttyACM*"
-    echo "Plug in the bridge radio and try again."
-    exit 1
-fi
-
-echo "Found Meshtastic device at $PORT"
-exec python -m bridge.mqtt_shim --port "$PORT"
+exec python -m bridge.mqtt_shim "$@"

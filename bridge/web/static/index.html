@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blue force tracker</title>
+<link rel="stylesheet" href="/static/isr-ui.css?v=3">
+<script src="/static/isr-ui.js?v=3"></script>
+<style>
+  .bf-btns { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 8px; }
+  .bf-btns .bf-clear { margin-left: auto; }
+  .bf-count { display: flex; align-items: baseline; gap: 12px; }
+  .bf-unit { min-width: 160px; }
+  .bf-where { font-size: 20px; min-width: 170px; }
+  .bf-course { margin-left: auto; }
+  main > .isr-card + .isr-card { margin-top: var(--gap); }
+  #units li { flex-wrap: wrap; }
+  @media (max-width: 640px) { .bf-unit, .bf-where { min-width: 0; } .bf-course { margin-left: 0; } }
+</style>
+</head>
+<body>
+<header class="isr-bar">
+  <h1>Blue force tracker</h1><span class="isr-sub">Demo patrol</span>
+  <div class="isr-right">
+    <button class="isr-pill" id="isr-status">Starting</button>
+    <a class="isr-kit-link" id="isr-kit-link" href="#">Kit</a>
+  </div>
+  <div class="isr-status-list" id="isr-status-list"></div>
+</header>
+
+<main>
+  <div class="isr-card" id="demo-card">
+    <h2>Demo</h2>
+    <div class="bf-btns" id="demo-btns"></div>
+    <div class="isr-muted" id="demo-note">Each button puts simulated friendly units on ATAK, labelled SIM.</div>
+  </div>
+
+  <div class="isr-card">
+    <h2>Simulated units</h2>
+    <div class="bf-count"><span class="isr-big" id="count">00</span><span class="isr-tag sim" id="sim-tag" hidden>SIM</span></div>
+    <ul class="isr-list" id="units"></ul>
+    <p class="isr-muted" id="empty">None on the map. Real units on the mesh appear in ATAK, not here.</p>
+  </div>
+
+  <details class="isr-more">
+    <summary>Details</summary>
+    <p id="details-text"></p>
+    <p>The patrol is three markers (SIM-Patrol1 to 3) walking a route near the OP for 3 minutes.
+      Clear demo takes them off ATAK at once. The radio bridge carries on as normal throughout.</p>
+  </details>
+</main>
+
+<script>
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  let demo = null, demoMsg = '', st = {};
+
+  function fromOp(u, c) {  // distance and compass point from the OP
+    const R = 6371008.8, rad = Math.PI / 180, p1 = c[0] * rad, p2 = u.lat * rad, dl = (u.lon - c[1]) * rad;
+    const h = Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    const m = 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+    const brg = (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) / rad + 360) % 360;
+    return `${m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'} ${POINTS[Math.floor((brg + 22.5) / 45) % 8]}`;
+  }
+
+  function render() {
+    const units = st.units || [];
+    document.getElementById('count').textContent = String(units.length).padStart(2, '0');
+    document.getElementById('sim-tag').hidden = !units.length;
+    document.getElementById('empty').hidden = units.length > 0;
+    document.getElementById('units').innerHTML = units.map(u => `<li>
+      <span class="bf-unit"><span class="aff friend"></span>${esc(u.callsign)}</span>
+      <span class="bf-where">${esc(fromOp(u, st.centre))}</span>
+      <span class="bf-course isr-muted">heading ${String(u.course % 360).padStart(3, '0')}°</span>
+      <span class="isr-tag sim">SIM</span></li>`).join('');
+    const checks = [{name: 'Demo', state: 'ok', text: st.demo_mode === 'on_demand' ? 'step by step' : 'continuous'}];
+    if (units.length || st.tak_connected)  // the demo connects to TAK only once a patrol starts
+      checks.push({name: 'TAK', state: st.tak_connected ? 'ok' : 'bad', text: st.tak_connected ? 'connected' : 'not connected'});
+    ISR.setStatus(checks);
+    document.getElementById('details-text').textContent =
+      `Demo mode ${st.demo_mode === 'on_demand' ? 'step by step (nothing simulated runs on its own)' : 'continuous'}. ` +
+      `OP ${st.centre ? st.centre.map(v => v.toFixed(5)).join(', ') : 'not set'}.`;
+  }
+
+  function showDemo() {
+    if (!demo) return;
+    const running = demo.active || [];
+    document.getElementById('demo-note').textContent = demoMsg ||
+      (running.length ? `Running: ${running.join(', ')}. Simulated, labelled SIM on ATAK.`
+        : 'Each button puts simulated friendly units on ATAK, labelled SIM.');
+  }
+  async function demoCall(path, body) {
+    demoMsg = '';
+    try {
+      const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body || {})});
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) demoMsg = typeof data.detail === 'string' ? data.detail : 'The bridge did not accept that.';
+      else if (path.endsWith('clear')) demoMsg = `Demo cleared: ${data.tracks} simulated units removed.`;
+    } catch (e) { demoMsg = 'The bridge is not answering. Try again in a moment.'; }
+    await refresh();
+    setTimeout(() => { demoMsg = ''; showDemo(); }, 6000);
+  }
+  async function refresh() {
+    try {
+      const [s, d] = await Promise.all(['/api/status', '/api/demo/scenarios'].map(u => fetch(u).then(r => r.json())));
+      st = s;
+      const first = !demo;
+      demo = d;
+      if (first) {
+        const btns = demo.scenarios.map(x => {
+          const b = document.createElement('button');
+          b.className = 'isr-btn'; b.textContent = x.label; b.title = x.hint;
+          b.addEventListener('click', () => demoCall('/api/demo/trigger', {id: x.id}));
+          return b;
+        });
+        const clear = document.createElement('button');
+        clear.className = 'isr-btn bf-clear'; clear.textContent = 'Clear demo';
+        clear.addEventListener('click', () => demoCall('/api/demo/clear'));
+        document.getElementById('demo-btns').replaceChildren(...btns, clear);
+      }
+      render(); showDemo();
+    } catch (e) {
+      ISR.setStatus([{name: 'Bridge', state: 'bad', text: 'not responding'}]);
+    }
+  }
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>
