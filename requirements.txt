@@ -1,5 +1,7 @@
-cryptography
-meshtastic
-paho-mqtt
-pika
-pytak
+# Upper caps: the newest versions tested (fresh uv venv, 2026-11-18); no lower bounds beyond what the
+# code needs, so an existing offline venv still satisfies them. Raise a cap only after the tests pass.
+cryptography<51
+meshtastic<2.8
+paho-mqtt<3
+pika<2
+pytak<8

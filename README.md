@@ -493,7 +493,7 @@ Requires a Meshtastic radio on USB and RabbitMQ running locally. Settings can al
 ### Tests
 
 ```bash
-pip install pytest
+pip install -r requirements.txt -r requirements-dev.txt   # versions are capped at the ones tested
 python -m pytest
 ```
 
