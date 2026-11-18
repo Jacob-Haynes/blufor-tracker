@@ -248,6 +248,18 @@ class DemoController:
     def stop(self):
         self._running = False
 
+    def shutdown(self, flush_s: float = 3.0):
+        """At process stop: Clear demo, then give the TAK client a moment to send the deletes.
+        Nothing to do (and no TAK connection opened) if no patrol was ever fired."""
+        self.stop()
+        if self._client is None:
+            return
+        try:
+            if self.clear()["tracks"] and not self._client.flush(flush_s):
+                logger.warning("TAK server not reachable: the patrol markers expire when stale instead")
+        except Exception:
+            logger.exception("Clearing the demo at shutdown failed")
+
     def _loop(self):
         while self._running:
             try:

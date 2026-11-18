@@ -222,8 +222,11 @@ def test_page_text_is_sentence_case():
 # ── modes at start-up ─────────────────────────────────────────────
 
 def _bft_main(monkeypatch, mode):
-    ran = {"run": 0, "served": 0}
+    ran = {"run": 0, "served": 0, "withdrawn": [], "shutdown": 0}
     monkeypatch.setattr(bft_sim.BftSimulator, "run", lambda self: ran.__setitem__("run", 1))
+    monkeypatch.setattr(bft_sim.BftSimulator, "withdraw", lambda self, why: ran["withdrawn"].append(why) or 0)
+    monkeypatch.setattr(bft_sim, "shutdown", lambda *a: ran.__setitem__("shutdown", 1))
+    monkeypatch.setattr(bft_sim.signal, "signal", lambda *a: None)
     monkeypatch.setattr(demo_mod, "serve", lambda demo, **k: ran.__setitem__("served", 1))
     monkeypatch.setattr(bft_sim.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
     if mode:
@@ -236,11 +239,12 @@ def _bft_main(monkeypatch, mode):
 
 
 def test_continuous_bft_sim_runs_its_units_as_before(monkeypatch):
-    assert _bft_main(monkeypatch, None) == {"run": 1, "served": 1}
+    assert _bft_main(monkeypatch, None) == {"run": 1, "served": 1, "withdrawn": [], "shutdown": 1}
 
 
 def test_on_demand_bft_sim_runs_no_units(monkeypatch):
-    assert _bft_main(monkeypatch, "on_demand") == {"run": 0, "served": 1}
+    assert _bft_main(monkeypatch, "on_demand") == {"run": 0, "served": 1, "withdrawn": ["step-by-step demo started"],
+                                                   "shutdown": 1}
 
 
 def test_simulated_meshbus_sends_no_fake_texts_on_demand(monkeypatch):

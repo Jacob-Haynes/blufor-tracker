@@ -741,7 +741,10 @@ def main():
     serve(demo)
 
     if args.simulate:
-        SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass, demo=demo).run()
+        try:
+            SimulatedMeshbus(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass, demo=demo).run()
+        finally:
+            demo.shutdown()  # a running patrol off ATAK at once, not when stale
         return
 
     shim = MqttShim(
@@ -757,6 +760,8 @@ def main():
     except Exception:
         logger.exception("Bridge failed")
         sys.exit(1)
+    finally:
+        demo.shutdown()  # a running patrol off ATAK at once, not when stale
 
 
 if __name__ == "__main__":

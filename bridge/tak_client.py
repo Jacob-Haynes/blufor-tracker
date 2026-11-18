@@ -253,6 +253,7 @@ class TakClient:
         self._running = False
         self._thread: threading.Thread | None = None
         self._sa_now = threading.Event()
+        self._sending = False  # an event is taken off the queue and not yet written
         self.connected = False
         self.registered = threading.Event()
         self.sent = 0
@@ -305,6 +306,17 @@ class TakClient:
     def wait_registered(self, timeout: float) -> bool:
         return self.registered.wait(timeout)
 
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Wait up to ``timeout`` s until every queued event is written to the socket (call it
+        before ``stop()`` at shutdown, so last-moment CoT such as deletes isn't lost). True if
+        the queue drained; False if the TAK server wasn't reachable in time."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self._queue.empty() and not self._sending:
+                return True
+            time.sleep(0.02)
+        return self._queue.empty() and not self._sending
+
     # ── socket thread ─────────────────────────────────────────────
 
     def _sleep(self, seconds: float) -> bool:
@@ -356,12 +368,15 @@ class TakClient:
                                     logger.exception("on_event failed")
                     for _ in range(50):
                         if pending is None:
+                            self._sending = True  # before the get, so flush() never sees a gap
                             try:
                                 pending = self._queue.get_nowait()
                             except queue.Empty:
+                                self._sending = False
                                 break
                         sock.sendall(pending.encode("utf-8"))
                         pending = None
+                        self._sending = False
                         self.sent += 1
             except OSError as e:
                 self.last_error = str(e)
